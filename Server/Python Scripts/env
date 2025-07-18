@@ -1,0 +1,9 @@
+AccountDataPath=/Users/davidnguyen/PycharmProjects/DavidOnlineChatRoom/Server/JSONFiles/accountData.json
+CensoredWords=/Users/davidnguyen/PycharmProjects/DavidOnlineChatRoom/Server/CensoredWords/censored_wordlist.txt
+ChatHistoryPath=/Users/davidnguyen/PycharmProjects/DavidOnlineChatRoom/Server/JSONFiles/chatHistory.json
+ClientPUPath=/Users/davidnguyen/PycharmProjects/DavidOnlineChatRoom/Server/ClientPublicKeys
+ClientUpToDateSourceCode=/Users/davidnguyen/PycharmProjects/DavidOnlineChatRoom/Server/Python Scripts/client(v1.2.0).py
+LockedAccount=/Users/davidnguyen/PycharmProjects/DavidOnlineChatRoom/Server/JSONFiles/lockedAccount.json
+ServerPI=/Users/davidnguyen/PycharmProjects/DavidOnlineChatRoom/Server/RSAKeys/ServerRSAprivateKey.pem
+ServerPU=/Users/davidnguyen/PycharmProjects/DavidOnlineChatRoom/Server/RSAKeys/ServerRSApublicKey.pem
+TimeOutPath=/Users/davidnguyen/PycharmProjects/DavidOnlineChatRoom/Server/JSONFiles/TimeOut.json
