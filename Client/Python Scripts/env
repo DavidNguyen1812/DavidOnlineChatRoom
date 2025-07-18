@@ -1,7 +1,7 @@
-CensoredWords=/Users/davidnguyen/PycharmProjects/DavidOnlineChatRoom/Client/CensoredWords/censored_wordlist.txt
-ClientPI=/Users/davidnguyen/PycharmProjects/DavidOnlineChatRoom/Client/RSAKeys/ClientRSAprivateKey.pem
-ClientPU=/Users/davidnguyen/PycharmProjects/DavidOnlineChatRoom/Client/RSAKeys/ClientRSApublicKey.pem
-ClientSourceCode=/Users/davidnguyen/PycharmProjects/DavidOnlineChatRoom/Client/Python Scripts/client.py
+CensoredWords=/path/to/Client/CensoredWords/censored_wordlist.txt
+ClientPI=/path/to/Client/RSAKeys/ClientRSAprivateKey.pem
+ClientPU=/path/to/Client/RSAKeys/ClientRSApublicKey.pem
+ClientSourceCode=/path/to/Client/Python Scripts/client.py
 PORT=3200
 ServerIP=18.221.149.159
-ServerPU=/Users/davidnguyen/PycharmProjects/DavidOnlineChatRoom/Client/RSAKeys/ServerRSApublicKey.pem
+ServerPU=/path/to/Client/RSAKeys/ServerRSApublicKey.pem
