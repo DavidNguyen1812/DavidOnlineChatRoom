@@ -30,7 +30,7 @@ NOTE:
 root = Tk()
 root.geometry("600x600")
 root.title("David Online Chat Room")
-root.resizable(False, False)
+root.resizable(True, True)
 
 DARK_GREY = '#121212'
 MEDIUM_GREY = '#1F1B24'
