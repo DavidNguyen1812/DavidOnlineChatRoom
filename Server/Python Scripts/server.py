@@ -141,6 +141,7 @@ def send_message_to_clients(server_message_to_be_sent, clientAddress):
 
 def client_handle(clientSocket, clientAddress):
     print(f"[NEW CONNECTION] {clientAddress} connected.")
+    global timed_out_list
     client_status = ''
     client_username = ''
     server_message_to_be_sent = ''
@@ -351,7 +352,7 @@ def client_handle(clientSocket, clientAddress):
 
 def start():
     global SHUTDOWN
-    serverSocket.listen(5)
+    serverSocket.listen(100)  # Listen up to 100 clients maximum!
     print(f"[LISTENING] Server is listening on {SERVER_IP}, Port {PORT}")
     try:
         while True:
