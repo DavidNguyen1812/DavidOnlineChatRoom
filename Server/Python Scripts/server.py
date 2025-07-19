@@ -33,6 +33,9 @@ with open(CHATHISTORY, "r") as file:
     chat_history = json.load(file)
 with open(LOCKEDACCOUNTPATH, "r") as file:
     locked_accounts = json.load(file)
+with open(TIMEOUTPATH, "r") as file:
+    timed_out_list = json.load(file)
+
 active_clients = {}
 
 # Account Data JSON format: "hashed username": [hashed user password, Last time log in, last time log in since epoch time]
@@ -68,24 +71,8 @@ def auto_deleting_expired_locked_accounts():
         json.dump(locked_accounts, file, indent=4)
 
 
-def removing_timeout_user():
-    print(f"Starting process of checking timed out accounts...")
-    with open(TIMEOUTPATH, "r") as file:
-        timed_out_list = json.load(file)
-    account_deleted = []
-    for user in timed_out_list:
-        if time.time() - timed_out_list[user] >= 10800:
-            print(f"Removing user {user} from timed out list...")
-            account_deleted.append(user)
-    for account in account_deleted:
-        del timed_out_list[account]
-    with open(TIMEOUTPATH, "w") as file:
-        json.dump(timed_out_list, file, indent=4)
-
-
 def daily_task():
     schedule.every().day.at("07:00").do(auto_deleting_expired_locked_accounts)
-    schedule.every(1).minutes.do(removing_timeout_user)
     while True:
         if SHUTDOWN:
             print(f"Server shut down!")
@@ -276,12 +263,19 @@ def client_handle(clientSocket, clientAddress):
                                                             f"Please contact the server admin via" \
                                                             f" davidnguyen1813@gmail.com to restore your account!"
                             else:
-                                with open(TIMEOUTPATH, "r") as file:
-                                    timed_out_list = json.load(file)
+                                user_timed_out = False
                                 if client_username in timed_out_list:
-                                    current_timed_out_value = str((10800 - (time.time() - timed_out_list[client_username])) / 3600).split(".")
-                                    server_message_to_be_sent = f"You are currently being TIMED OUT for {current_timed_out_value[0]} hour(s) and {round(float(f'.{current_timed_out_value[1]}') * 60)} minute(s)!"
-                                else:
+                                    if time.time() - timed_out_list[client_username] >= 10800:
+                                        print(f"Removing user {client_username} from timed out list...")
+                                        del timed_out_list[client_username]
+                                        with open(TIMEOUTPATH, "w") as file:
+                                            json.dump(timed_out_list, file, indent=4)
+                                    else:
+                                        user_timed_out = True
+                                        current_timed_out_value = str(
+                                            (10800 - (time.time() - timed_out_list[client_username])) / 3600).split(".")
+                                        server_message_to_be_sent = f"You are currently being TIMED OUT for {current_timed_out_value[0]} hour(s) and {round(float(f'.{current_timed_out_value[1]}') * 60)} minute(s)!"
+                                if not user_timed_out:
                                     if client_username in account_data:
                                         duplicateSession = False
                                         for client in active_clients:
