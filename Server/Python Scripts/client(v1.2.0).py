@@ -326,7 +326,7 @@ if os.path.exists(CLIENTPRIVATEKEY):
     os.remove(CLIENTPRIVATEKEY)
 if os.path.exists(CLIENTPUBLICKEY):
     os.remove(CLIENTPUBLICKEY)
-
+updateMessageBox("Old RSA keys have been removed and new RSA keys generated!\n")
 
 key = RSA.generate(4096)
 privateKey = key.export_key()
@@ -335,6 +335,7 @@ with open(CLIENTPRIVATEKEY, "wb") as pemfile:
     pemfile.write(privateKey)
 with open(CLIENTPUBLICKEY, "wb") as pemfile:
     pemfile.write(publicKey)
+
 
 with open(SERVERPUBLICKEY, "rb") as file:
     data = file.read()
