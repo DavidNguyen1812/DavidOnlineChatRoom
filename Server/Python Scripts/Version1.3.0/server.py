@@ -2,6 +2,7 @@ from socket import *
 from threading import *
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP
+from Crypto.Cipher import AES
 from Crypto.Signature import pss
 from Crypto.Hash import SHA256
 from dotenv import load_dotenv
@@ -281,100 +282,113 @@ def client_handle(clientSocket, clientAddress):
                                                'You must run the most up to date client script to join the server!'
 
                         server_message_to_be_sent = send_message
-
-                    elif client_msg.startswith("#0001a"):
-                        client_msg = client_msg.split("#0001a")[1]
-                        if active_clients[clientAddress][2] == '':
-                            server_message_to_be_sent = "Begin logging in process...\n" \
-                                                        "What is your username?\n"
-                            active_clients[clientAddress][2] = 'checking username'
-                        elif active_clients[clientAddress][2] == 'checking username':
-                            client_username = client_msg
-                            account_locked = False
-                            for accountId in locked_accounts:
-                                if locked_accounts[accountId][0] == client_username:
-                                    account_locked = True
-                                    break
-                            if account_locked:
-                                server_message_to_be_sent = f"Your account has been LOCKED \n" \
-                                                            f"Please contact the server admin via" \
-                                                            f" davidnguyen1813@gmail.com to restore your account!"
-                            else:
-                                user_timed_out = False
-                                if client_username in timed_out_list:
-                                    if time.time() - timed_out_list[client_username] >= 10800:
-                                        print(f"Removing user {client_username} from timed out list...")
-                                        del timed_out_list[client_username]
-                                        with open(TIMEOUTPATH, "w") as file:
-                                            json.dump(timed_out_list, file, indent=4)
-                                    else:
-                                        user_timed_out = True
-                                        current_timed_out_value = str(
-                                            (10800 - (time.time() - timed_out_list[client_username])) / 3600).split(".")
-                                        server_message_to_be_sent = f"You are currently being TIMED OUT for {current_timed_out_value[0]} hour(s) and {round(float(f'.{current_timed_out_value[1]}') * 60)} minute(s)!"
-                                if not user_timed_out:
-                                    if client_username in account_data:
-                                        duplicateSession = False
-                                        for client in active_clients:
-                                            if active_clients[client][1] == client_username:
-                                                duplicateSession = True
-                                                break
-                                        if duplicateSession:
-                                            server_message_to_be_sent = "Another device is in sessioned with the account associate with the username.\n" \
-                                                                        "For security reason, you have to provide a different valid account to log in!\n"
+                    elif client_msg.startswith(("#0001a", "#0001b")):
+                        tag = "#0001a" if client_msg.startswith("#0001a") else "#0001b"
+                        client_msg = client_msg.split("#0001a")[1] if client_msg.startswith("#0001a") else client_msg.split("#0001b")[1]
+                        shared_secret = client_msg.split(" ")[0]
+                        cipher_text = client_msg.split(" ")[1]
+                        # Server decrypt shared secret with server private key
+                        cipherRSA = PKCS1_OAEP.new(RSA.import_key(open(SERVERPRIVATEKEY).read()))
+                        key_bundle = cipherRSA.decrypt(base64.b64decode(shared_secret)).decode('utf-8')
+                        key_bundle = key_bundle.split(":")
+                        # Server decrypt the cipher text with key, tag and nonce
+                        AESKey = base64.b64decode(key_bundle[0])
+                        AESTag = base64.b64decode(key_bundle[1])
+                        AESNonce = base64.b64decode(key_bundle[2])
+                        cipher = AES.new(AESKey, AES.MODE_OCB, nonce=AESNonce)
+                        decrypted_text = cipher.decrypt_and_verify(base64.b64decode(cipher_text), AESTag)
+                        client_msg = decrypted_text.decode()
+                        if tag.startswith("#0001a"):
+                            if active_clients[clientAddress][2] == '':
+                                server_message_to_be_sent = "Begin logging in process...\n" \
+                                                            "What is your username?\n"
+                                active_clients[clientAddress][2] = 'checking username'
+                            elif active_clients[clientAddress][2] == 'checking username':
+                                client_username = client_msg
+                                account_locked = False
+                                for accountId in locked_accounts:
+                                    if locked_accounts[accountId][0] == client_username:
+                                        account_locked = True
+                                        break
+                                if account_locked:
+                                    server_message_to_be_sent = f"Your account has been LOCKED \n" \
+                                                                f"Please contact the server admin via" \
+                                                                f" davidnguyen1813@gmail.com to restore your account!"
+                                else:
+                                    user_timed_out = False
+                                    if client_username in timed_out_list:
+                                        if time.time() - timed_out_list[client_username] >= 10800:
+                                            print(f"Removing user {client_username} from timed out list...")
+                                            del timed_out_list[client_username]
+                                            with open(TIMEOUTPATH, "w") as file:
+                                                json.dump(timed_out_list, file, indent=4)
                                         else:
-                                            active_clients[clientAddress][1] = client_username
-                                            server_message_to_be_sent = "Please provide your password!\n"
-                                            active_clients[clientAddress][2] = 'checking password'
-                                            password_input_attempt -= 1
+                                            user_timed_out = True
+                                            current_timed_out_value = str(
+                                                (10800 - (time.time() - timed_out_list[client_username])) / 3600).split(".")
+                                            server_message_to_be_sent = f"You are currently being TIMED OUT for {current_timed_out_value[0]} hour(s) and {round(float(f'.{current_timed_out_value[1]}') * 60)} minute(s)!"
+                                    if not user_timed_out:
+                                        if client_username in account_data:
+                                            duplicateSession = False
+                                            for client in active_clients:
+                                                if active_clients[client][1] == client_username:
+                                                    duplicateSession = True
+                                                    break
+                                            if duplicateSession:
+                                                server_message_to_be_sent = "Another device is in sessioned with the account associate with the username.\n" \
+                                                                            "For security reason, you have to provide a different valid account to log in!\n"
+                                            else:
+                                                active_clients[clientAddress][1] = client_username
+                                                server_message_to_be_sent = "Please provide your password!\n"
+                                                active_clients[clientAddress][2] = 'checking password'
+                                                password_input_attempt -= 1
+                                        else:
+                                            server_message_to_be_sent = "There is no account with the provided username!\n" \
+                                                                        "Please provide another username!\n" \
+                                                                        "If you want to create a new account, please relaunch the application and type SIGN UP!\n"
+                            elif active_clients[clientAddress][2] == 'checking password':
+                                if account_data[client_username][0] == client_msg:
+                                    server_message_to_be_sent = "AUTHENTICATION SUCCESS!"
+                                    active_clients[clientAddress][2] = 'loading chat history'
+                                    account_data[client_username][1] = f"Last logged in: {time.ctime(time.time())}"
+                                    account_data[client_username][2] = time.time()
+                                    with open(ACCOUNTJSONPATH, "w") as JSONfile:
+                                        json.dump(account_data, JSONfile, indent=4)
+                                else:
+                                    if password_input_attempt != 0:
+                                        server_message_to_be_sent = f"Invalid password!\n" \
+                                                                    f"You have {password_input_attempt} left!"
+                                        password_input_attempt -= 1
                                     else:
-                                        server_message_to_be_sent = "There is no account with the provided username!\n" \
-                                                                    "Please provide another username!\n" \
-                                                                    "If you want to create a new account, please relaunch the application and type SIGN UP!\n"
-                        elif active_clients[clientAddress][2] == 'checking password':
-                            if account_data[client_username][0] == client_msg:
+                                        locked_accounts[len(locked_accounts) + 1] = [client_username, f"Time of account locked: {time.ctime(time.time())}", time.time()]
+                                        with open(LOCKEDACCOUNTPATH, "w") as jsonfile:
+                                            json.dump(locked_accounts, jsonfile, indent=4)
+                                        server_message_to_be_sent = f"Your account is now LOCKED due to many failed login attempts!\n" \
+                                                                    f"Please contact the server admin via davidnguyen1813@gmail.com to restore your account!"
+                        else:
+                            if active_clients[clientAddress][2] == '':
+                                server_message_to_be_sent = "Begin signing up process...\n" \
+                                                            "Please type a username?\n"
+                                active_clients[clientAddress][2] = "checking username"
+                            elif active_clients[clientAddress][2] == "checking username":
+                                client_username = client_msg
+                                if client_username in account_data:
+                                    server_message_to_be_sent = "The username has been taken\n" \
+                                                                "Please choose another username!\n"
+                                else:
+                                    active_clients[clientAddress][1] = client_username
+                                    server_message_to_be_sent = "Please set up a password!\n" \
+                                                                "Must be 12 length minimum\n" \
+                                                                "Must have mixed characters and numbers\n" \
+                                                                "Letters must have mixed case\n" \
+                                                                "Contains the following special characters !@#$%&*_+=\n"
+                                    active_clients[clientAddress][2] = "setting password"
+                            elif active_clients[clientAddress][2] == "setting password":
+                                account_data[client_username] = [client_msg, f"Last logged in: {time.ctime(time.time())}", time.time()]
+                                with open(ACCOUNTJSONPATH, "w") as jsonfile:
+                                    json.dump(account_data, jsonfile, indent=4)
                                 server_message_to_be_sent = "AUTHENTICATION SUCCESS!"
                                 active_clients[clientAddress][2] = 'laoding chat history'
-                                account_data[client_username][1] = f"Last logged in: {time.ctime(time.time())}"
-                                account_data[client_username][2] = time.time()
-                                with open(ACCOUNTJSONPATH, "w") as JSONfile:
-                                    json.dump(account_data, JSONfile, indent=4)
-                            else:
-                                if password_input_attempt != 0:
-                                    server_message_to_be_sent = f"Invalid password!\n" \
-                                                                f"You have {password_input_attempt} left!"
-                                    password_input_attempt -= 1
-                                else:
-                                    locked_accounts[len(locked_accounts) + 1] = [client_username, f"Time of account locked: {time.ctime(time.time())}", time.time()]
-                                    with open(LOCKEDACCOUNTPATH, "w") as jsonfile:
-                                        json.dump(locked_accounts, jsonfile, indent=4)
-                                    server_message_to_be_sent = f"Your account is now LOCKED due to many failed login attempts!\n" \
-                                                                f"Please contact the server admin via davidnguyen1813@gmail.com to restore your account!"
-                    elif client_msg.startswith("#0001b"):
-                        client_msg = client_msg.split("#0001b")[1]
-                        if active_clients[clientAddress][2] == '':
-                            server_message_to_be_sent = "Begin signing up process...\n" \
-                                                        "Please type a username?\n"
-                            active_clients[clientAddress][2] = "checking username"
-                        elif active_clients[clientAddress][2] == "checking username":
-                            client_username = client_msg
-                            if client_username in account_data:
-                                server_message_to_be_sent = "The username has been taken\n" \
-                                                            "Please choose another username!\n"
-                            else:
-                                active_clients[clientAddress][1] = client_username
-                                server_message_to_be_sent = "Please set up a password!\n" \
-                                                            "Must be 12 length minimum\n" \
-                                                            "Must have mixed characters and numbers\n" \
-                                                            "Letters must have mixed case\n" \
-                                                            "Contains the following special characters !@#$%&*_+=\n"
-                                active_clients[clientAddress][2] = "setting password"
-                        elif active_clients[clientAddress][2] == "setting password":
-                            account_data[client_username] = [client_msg, f"Last logged in: {time.ctime(time.time())}", time.time()]
-                            with open(ACCOUNTJSONPATH, "w") as jsonfile:
-                                json.dump(account_data, jsonfile, indent=4)
-                            server_message_to_be_sent = "AUTHENTICATION SUCCESS!"
-                            active_clients[clientAddress][2] = 'laoding chat history'
                 send_message_to_clients(server_message_to_be_sent, clientAddress)
     except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
         if os.path.exists(active_clients[clientAddress][3]):
