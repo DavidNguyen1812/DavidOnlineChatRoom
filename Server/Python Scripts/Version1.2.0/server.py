@@ -216,7 +216,7 @@ def client_handle(clientSocket, clientAddress):
                                                    'You must run the most up to date client script to join the server!'
                             else:
                                 send_message = "Invalid Server Public Key!\n" \
-                                               "Please contact the server admin at davidnguyen1813@gmail.com to obtain" \
+                                               "Please contact the server admin at {put your own email here as a server admin} to obtain" \
                                                " the correct server public key!"
                         elif client_msg.startswith("#0000a"):
                             if client_msg.strip("#0000a") == "UPDATE":
