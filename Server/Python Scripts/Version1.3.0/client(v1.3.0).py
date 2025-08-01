@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 
 import time
 import os
+import shutil
 import hashlib
 import base64
 import re
@@ -80,7 +81,7 @@ def sendMessageToServer(msg):
             if USERNAME == "User inputting username":
                 USERNAME = msg
             msg = hashlib.sha512(msg.encode()).hexdigest()
-        if tag.startswith("#0011"):
+        if tag.startswith(("#0011", "#0001")):
             if msg == "I just cursed!":
                 pass
             else:
@@ -256,6 +257,8 @@ def receive_message():
 
                             if server_source_code_hash == client_source_code_hash and server_cennsored_word_data_hash == client_censored_word_data_hash:
                                 updateMessageBox(f"Check Passed! Proceeding to download the update\n")
+                                if os.path.exists(f"{os.getcwd()}/UpdatedFiles"):
+                                    shutil.rmtree(f"{os.getcwd()}/UpdatedFiles")
                                 os.mkdir(f"{os.getcwd()}/UpdatedFiles")
                                 with open(f"{os.getcwd()}/UpdatedFiles/client.py", "wb") as newFile:
                                     newFile.write(base64.b64decode(source_code))
@@ -366,11 +369,13 @@ main_message_box = scrolledtext.ScrolledText(middle_frame, font=FONT, bg=MEDIUM_
 main_message_box.config(state=DISABLED)
 main_message_box.pack(side=TOP)
 
+'''
 if os.path.exists(CLIENTPRIVATEKEY):
     os.remove(CLIENTPRIVATEKEY)
 if os.path.exists(CLIENTPUBLICKEY):
     os.remove(CLIENTPUBLICKEY)
 updateMessageBox("Old RSA keys have been removed and new RSA keys generated!\n")
+
 
 key = RSA.generate(4096)
 privateKey = key.export_key()
@@ -379,7 +384,7 @@ with open(CLIENTPRIVATEKEY, "wb") as pemfile:
     pemfile.write(privateKey)
 with open(CLIENTPUBLICKEY, "wb") as pemfile:
     pemfile.write(publicKey)
-
+'''
 
 with open(SERVERPUBLICKEY, "rb") as file:
     data = file.read()
