@@ -369,7 +369,6 @@ main_message_box = scrolledtext.ScrolledText(middle_frame, font=FONT, bg=MEDIUM_
 main_message_box.config(state=DISABLED)
 main_message_box.pack(side=TOP)
 
-'''
 if os.path.exists(CLIENTPRIVATEKEY):
     os.remove(CLIENTPRIVATEKEY)
 if os.path.exists(CLIENTPUBLICKEY):
@@ -384,7 +383,6 @@ with open(CLIENTPRIVATEKEY, "wb") as pemfile:
     pemfile.write(privateKey)
 with open(CLIENTPUBLICKEY, "wb") as pemfile:
     pemfile.write(publicKey)
-'''
 
 with open(SERVERPUBLICKEY, "rb") as file:
     data = file.read()
