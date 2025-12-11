@@ -1,0 +1,851 @@
+threagile_version: 1.0.0
+
+title: 445Cyber Co. Risk Model
+
+date: 2025-12-11
+
+author:
+  name: Student
+  homepage: 
+
+management_summary_comment: >
+  445Cyber Co. is a rapidly growing cybersecurity consulting company that failed a Red Team inspection
+  and must rebuild its systems from scratch with exemplary security and resilience to maintain a major
+  contract serving hundreds of organizations.
+
+business_criticality: critical
+
+business_overview:
+  description: >
+    445Cyber Co. provides cybersecurity consulting services to clients, with 48 consultants and technicians
+    performing onsite assessments, network analysis, and security implementation. The company must demonstrate
+    exemplary cybersecurity practices for its own systems as a contract requirement.
+
+technical_overview:
+  description: >
+    Current systems include Windows laptops (individually configured), Windows-based file/email servers,
+    an insecure MS-Access database with shared credentials, and outsourced accounting. The proposed solution
+    will migrate to cloud-based services with proper security controls, encryption, access management, and
+    resilience measures including automated backups and disaster recovery capabilities.
+
+questions:
+  How are client files kept separate and secure?: >
+    Client files will be segregated using folder structures with role-based access control in cloud storage,
+    with encryption at rest and in transit.
+  How will laptops be provisioned securely?: >
+    Standardized secure laptop provisioning with full disk encryption, EDR agents, automated patching,
+    and configuration management.
+  How will remote access be secured?: >
+    VPN with multi-factor authentication for all remote access to internal resources.
+
+abuse_cases:
+  Client Data Theft: >
+    As a hacker I want to steal client deliverables and analysis documents in order to sell them to
+    competitors or leak them publicly to damage 445Cyber's reputation.
+  Ransomware Attack: >
+    As a hacker I want to encrypt 445Cyber's file servers and databases in order to extort ransom
+    and disrupt business operations.
+  Credential Compromise: >
+    As a hacker I want to steal employee credentials in order to gain unauthorized access to client
+    data and internal systems.
+  Laptop Theft Data Breach: >
+    As a hacker I want to steal unencrypted laptops from consultants in the field in order to
+    access sensitive client information.
+  Database Compromise: >
+    As a hacker I want to exploit the weak database credentials to access billing, payment, and
+    client interaction records.
+
+security_requirements:
+  Multi-Factor Authentication: All administrative and remote access must use MFA.
+  Data Encryption: All sensitive data must be encrypted at rest and in transit.
+  Access Control: Role-based access control must be implemented for all systems.
+  Secure Development: Developers must follow secure coding guidelines for all custom applications.
+  Backup and Recovery: Critical systems must have automated backups with tested recovery procedures.
+  Incident Response: Documented incident response procedures must be in place.
+
+tags_available:
+  - windows
+  - aws
+  - aws:ec2
+  - aws:s3
+  - aws:rds
+  - cloud
+  - okta
+  - azure-ad
+  - sharepoint
+  - microsoft365
+
+data_assets:
+
+  Client Deliverables: &client-deliverables
+    id: client-deliverables
+    description: Analysis documents, design papers, and deliverables for client engagements
+    usage: business
+    tags:
+    origin: 445Cyber Co.
+    owner: 445Cyber Co.
+    quantity: many
+    confidentiality: strictly-confidential
+    integrity: critical
+    availability: critical
+    justification_cia_rating: >
+      Client deliverables contain sensitive security assessments and recommendations. Loss or compromise
+      would damage client relationships and 445Cyber's reputation. Must be available for consultant access.
+
+  Client Billing Data:
+    id: client-billing-data
+    description: Client interaction records, billing information, payment data, invoices
+    usage: business
+    tags:
+    origin: 445Cyber Co.
+    owner: 445Cyber Co.
+    quantity: many
+    confidentiality: confidential
+    integrity: mission-critical
+    availability: mission-critical
+    justification_cia_rating: >
+      Billing data is essential for company revenue. Integrity is mission-critical as errors could
+      result in revenue loss or compliance issues. Must be continuously available.
+
+  Employee Credentials:
+    id: employee-credentials
+    description: Employee usernames, passwords, MFA tokens, and authentication data
+    usage: business
+    tags:
+    origin: 445Cyber Co.
+    owner: 445Cyber Co.
+    quantity: few
+    confidentiality: strictly-confidential
+    integrity: critical
+    availability: critical
+    justification_cia_rating: >
+      Compromise of credentials would allow unauthorized access to all company systems and client data.
+
+  HR Records:
+    id: hr-records
+    description: Resumes, salary records, SSNs, offer letters, employee personal information
+    usage: business
+    tags:
+    origin: 445Cyber Co.
+    owner: 445Cyber Co.
+    quantity: few
+    confidentiality: strictly-confidential
+    integrity: important
+    availability: operational
+    justification_cia_rating: >
+      HR data contains PII and salary information that must be strictly protected to comply with
+      privacy regulations and maintain employee trust.
+
+  Cyber Library Content:
+    id: cyber-library
+    description: Tools, configuration guides, proprietary methodologies, technical documentation
+    usage: business
+    tags:
+    origin: 445Cyber Co.
+    owner: 445Cyber Co.
+    quantity: many
+    confidentiality: confidential
+    integrity: important
+    availability: critical
+    justification_cia_rating: >
+      The cyber library is essential for consultant effectiveness. Loss of availability would
+      impact client service delivery. Contains proprietary methodologies.
+
+  Website Content:
+    id: website-content
+    description: Public marketing materials, company information, brochure content
+    usage: business
+    tags:
+    origin: 445Cyber Co.
+    owner: 445Cyber Co.
+    quantity: very-few
+    confidentiality: public
+    integrity: important
+    availability: important
+    justification_cia_rating: >
+      Public-facing content must maintain integrity to avoid reputational damage.
+
+  Payment Card Data:
+    id: payment-card-data
+    description: Credit card information submitted by clients for payment
+    usage: business
+    tags:
+    origin: Customer
+    owner: Customer
+    quantity: many
+    confidentiality: strictly-confidential
+    integrity: critical
+    availability: important
+    justification_cia_rating: >
+      PCI-DSS compliance required. Compromise would result in regulatory penalties and reputation damage.
+
+  Application Code:
+    id: application-code
+    description: DevOps utilities, configurations, custom applications developed in-house
+    usage: devops
+    tags:
+    origin: 445Cyber Co.
+    owner: 445Cyber Co.
+    quantity: few
+    confidentiality: confidential
+    integrity: critical
+    availability: important
+    justification_cia_rating: >
+      Custom code may contain sensitive logic and configurations. Integrity is critical to
+      prevent backdoors or malicious modifications.
+
+technical_assets:
+
+  Consultant Laptops:
+    id: consultant-laptops
+    description: Windows laptops used by 48 consultants in field and office
+    type: external-entity
+    usage: business
+    used_as_client_by_human: true
+    out_of_scope: false
+    justification_out_of_scope:
+    size: component
+    technology: desktop
+    tags:
+      - windows
+    internet: true
+    machine: physical
+    encryption: data-with-enduser-individual-key
+    owner: 445Cyber Co.
+    confidentiality: confidential
+    integrity: important
+    availability: important
+    justification_cia_rating: >
+      Laptops contain cached client data and must be protected against theft. Full disk encryption
+      and remote wipe capabilities required.
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed:
+      - client-deliverables
+      - cyber-library
+      - employee-credentials
+    data_assets_stored:
+      - client-deliverables
+    data_formats_accepted:
+      - file
+      - json
+    communication_links:
+      VPN Access:
+        target: vpn-gateway
+        description: Secure remote access to internal resources
+        protocol: https
+        authentication: two-factor
+        authorization: enduser-identity-propagation
+        tags:
+        vpn: true
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent:
+          - employee-credentials
+        data_assets_received:
+          - client-deliverables
+          - cyber-library
+      File Sync:
+        target: cloud-file-storage
+        description: Automated backup of consultant work to cloud storage
+        protocol: https
+        authentication: token
+        authorization: enduser-identity-propagation
+        tags:
+          - cloud
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent:
+          - client-deliverables
+        data_assets_received:
+          - client-deliverables
+
+  Employee Workstations:
+    id: employee-workstations
+    description: Desktop/laptop workstations for office staff (CEO, VPs, HR, sys admin)
+    type: external-entity
+    usage: business
+    used_as_client_by_human: true
+    out_of_scope: false
+    justification_out_of_scope:
+    size: component
+    technology: desktop
+    tags:
+      - windows
+    internet: true
+    machine: physical
+    encryption: data-with-enduser-individual-key
+    owner: 445Cyber Co.
+    confidentiality: confidential
+    integrity: important
+    availability: important
+    justification_cia_rating: >
+      Office workstations access sensitive financial, HR, and operational data.
+    multi_tenant: false
+    redundant: false
+    custom_developed_parts: false
+    data_assets_processed:
+      - client-billing-data
+      - hr-records
+      - client-deliverables
+    data_assets_stored:
+      - hr-records
+    data_formats_accepted:
+      - file
+      - json
+    communication_links:
+      Office Network Access:
+        target: internal-network
+        description: Access to internal cloud resources
+        protocol: https
+        authentication: session-id
+        authorization: enduser-identity-propagation
+        tags:
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent:
+          - client-billing-data
+          - hr-records
+        data_assets_received:
+          - client-billing-data
+          - hr-records
+          - client-deliverables
+
+  VPN Gateway:
+    id: vpn-gateway
+    description: VPN concentrator for secure remote access
+    type: process
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: false
+    justification_out_of_scope:
+    size: component
+    technology: gateway
+    tags:
+      - cloud
+    internet: true
+    machine: virtual
+    encryption: transparent
+    owner: 445Cyber Co.
+    confidentiality: confidential
+    integrity: critical
+    availability: critical
+    justification_cia_rating: >
+      VPN gateway is critical for secure remote access by field consultants.
+    multi_tenant: false
+    redundant: true
+    custom_developed_parts: false
+    data_assets_processed:
+      - employee-credentials
+    data_assets_stored:
+    data_formats_accepted:
+    communication_links:
+      Auth Check:
+        target: identity-provider
+        description: MFA authentication for VPN users
+        protocol: https
+        authentication: two-factor
+        authorization: technical-user
+        tags:
+        vpn: false
+        ip_filtered: false
+        readonly: true
+        usage: business
+        data_assets_sent:
+          - employee-credentials
+        data_assets_received:
+
+  Identity Provider:
+    id: identity-provider
+    description: Azure AD / Okta for centralized authentication and MFA
+    type: process
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: false
+    justification_out_of_scope:
+    size: service
+    technology: identity-provider
+    tags:
+      - azure-ad
+      - okta
+      - cloud
+    internet: false
+    machine: serverless
+    encryption: data-with-symmetric-shared-key
+    owner: 445Cyber Co.
+    confidentiality: strictly-confidential
+    integrity: mission-critical
+    availability: mission-critical
+    justification_cia_rating: >
+      Identity provider is critical for all authentication. Compromise would allow unauthorized
+      access to all systems.
+    multi_tenant: true
+    redundant: true
+    custom_developed_parts: false
+    data_assets_processed:
+      - employee-credentials
+    data_assets_stored:
+      - employee-credentials
+    data_formats_accepted:
+      - json
+    communication_links:
+
+  Cloud File Storage:
+    id: cloud-file-storage
+    description: AWS S3 / Azure Blob storage for client deliverables and company files
+    type: datastore
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: false
+    justification_out_of_scope:
+    size: service
+    technology: file-server
+    tags:
+      - aws
+      - aws:s3
+      - cloud
+    internet: false
+    machine: serverless
+    encryption: data-with-symmetric-shared-key
+    owner: 445Cyber Co.
+    confidentiality: strictly-confidential
+    integrity: critical
+    availability: critical
+    justification_cia_rating: >
+      Contains all client deliverables and company files. Must be encrypted and highly available
+      with automated backups.
+    multi_tenant: false
+    redundant: true
+    custom_developed_parts: false
+    data_assets_processed:
+    data_assets_stored:
+      - client-deliverables
+      - cyber-library
+    data_formats_accepted:
+      - file
+    communication_links:
+
+  Application Database:
+    id: application-database
+    description: AWS RDS / Azure SQL Database for client records, billing, project management
+    type: datastore
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: false
+    justification_out_of_scope:
+    size: service
+    technology: database
+    tags:
+      - aws
+      - aws:rds
+      - cloud
+    internet: false
+    machine: serverless
+    encryption: data-with-symmetric-shared-key
+    owner: 445Cyber Co.
+    confidentiality: strictly-confidential
+    integrity: mission-critical
+    availability: mission-critical
+    justification_cia_rating: >
+      Database contains client billing information, interaction records, and project data. Must be
+      encrypted, backed up, and highly available.
+    multi_tenant: false
+    redundant: true
+    custom_developed_parts: false
+    data_assets_processed:
+    data_assets_stored:
+      - client-billing-data
+    data_formats_accepted:
+      - json
+    communication_links:
+
+  Web Application Server:
+    id: web-app-server
+    description: Application server hosting internal portal, project management, wiki
+    type: process
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: false
+    justification_out_of_scope:
+    size: application
+    technology: web-application
+    tags:
+      - aws
+      - aws:ec2
+      - cloud
+    internet: false
+    machine: container
+    encryption: none
+    owner: 445Cyber Co.
+    confidentiality: confidential
+    integrity: critical
+    availability: critical
+    justification_cia_rating: >
+      Web application hosts the project management portal, wiki, and shared calendar.
+    multi_tenant: false
+    redundant: true
+    custom_developed_parts: true
+    data_assets_processed:
+      - client-deliverables
+      - cyber-library
+      - client-billing-data
+      - application-code
+    data_assets_stored:
+      - application-code
+    data_formats_accepted:
+      - json
+      - file
+    communication_links:
+      Database Access:
+        target: application-database
+        description: Application queries to database
+        protocol: jdbc
+        authentication: credentials
+        authorization: technical-user
+        tags:
+        vpn: false
+        ip_filtered: true
+        readonly: false
+        usage: business
+        data_assets_sent:
+          - client-billing-data
+        data_assets_received:
+          - client-billing-data
+      File Storage Access:
+        target: cloud-file-storage
+        description: Access to file storage
+        protocol: https
+        authentication: token
+        authorization: technical-user
+        tags:
+          - cloud
+        vpn: false
+        ip_filtered: true
+        readonly: false
+        usage: business
+        data_assets_sent:
+          - client-deliverables
+          - cyber-library
+        data_assets_received:
+          - client-deliverables
+          - cyber-library
+      Auth Check:
+        target: identity-provider
+        description: User authentication
+        protocol: https
+        authentication: token
+        authorization: technical-user
+        tags:
+        vpn: false
+        ip_filtered: false
+        readonly: true
+        usage: business
+        data_assets_sent:
+          - employee-credentials
+        data_assets_received:
+
+  Public Website:
+    id: public-website
+    description: Public-facing website with marketing content and payment portal
+    type: process
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: false
+    justification_out_of_scope:
+    size: application
+    technology: web-server
+    tags:
+      - aws
+      - cloud
+    internet: true
+    machine: container
+    encryption: none
+    owner: 445Cyber Co.
+    confidentiality: public
+    integrity: important
+    availability: important
+    justification_cia_rating: >
+      Public website must maintain integrity to avoid reputational damage.
+    multi_tenant: false
+    redundant: true
+    custom_developed_parts: true
+    data_assets_processed:
+      - website-content
+      - payment-card-data
+    data_assets_stored:
+      - website-content
+    data_formats_accepted:
+      - json
+      - file
+    communication_links:
+      Payment Processing:
+        target: payment-gateway
+        description: Credit card payment processing
+        protocol: https
+        authentication: token
+        authorization: technical-user
+        tags:
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent:
+          - payment-card-data
+        data_assets_received:
+
+  Payment Gateway:
+    id: payment-gateway
+    description: Third-party PCI-compliant payment processor (Stripe, Square)
+    type: external-entity
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: true
+    justification_out_of_scope: Managed by third-party payment processor
+    size: service
+    technology: web-service-rest
+    tags:
+      - cloud
+    internet: true
+    machine: serverless
+    encryption: data-with-symmetric-shared-key
+    owner: Third Party
+    confidentiality: strictly-confidential
+    integrity: critical
+    availability: important
+    justification_cia_rating: >
+      Third-party payment processor handles PCI compliance.
+    multi_tenant: true
+    redundant: true
+    custom_developed_parts: false
+    data_assets_processed:
+      - payment-card-data
+    data_assets_stored:
+      - payment-card-data
+    data_formats_accepted:
+      - json
+    communication_links:
+
+  External Accounting System:
+    id: external-accounting
+    description: Outsourced accounting firm's hosted system
+    type: external-entity
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: true
+    justification_out_of_scope: Managed by accounting firm
+    size: system
+    technology: erp
+    tags:
+    internet: true
+    machine: virtual
+    encryption: transparent
+    owner: Accounting Firm
+    confidentiality: confidential
+    integrity: critical
+    availability: critical
+    justification_cia_rating: >
+      External accounting system is out of scope but must be accessed securely.
+    multi_tenant: true
+    redundant: true
+    custom_developed_parts: false
+    data_assets_processed:
+      - client-billing-data
+    data_assets_stored:
+    data_formats_accepted:
+    communication_links:
+
+  Internal Network:
+    id: internal-network
+    description: Internal cloud network segment for application resources
+    type: process
+    usage: business
+    used_as_client_by_human: false
+    out_of_scope: false
+    justification_out_of_scope:
+    size: system
+    technology: gateway
+    tags:
+      - cloud
+    internet: false
+    machine: virtual
+    encryption: transparent
+    owner: 445Cyber Co.
+    confidentiality: confidential
+    integrity: critical
+    availability: critical
+    justification_cia_rating: >
+      Internal network provides connectivity between cloud resources.
+    multi_tenant: false
+    redundant: true
+    custom_developed_parts: false
+    data_assets_processed:
+      - client-deliverables
+      - client-billing-data
+    data_assets_stored:
+    data_formats_accepted:
+    communication_links:
+      App Server Access:
+        target: web-app-server
+        description: Access to application server
+        protocol: https
+        authentication: session-id
+        authorization: enduser-identity-propagation
+        tags:
+        vpn: false
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent:
+        data_assets_received:
+          - client-deliverables
+          - client-billing-data
+      Accounting Access:
+        target: external-accounting
+        description: Secure connection to external accounting
+        protocol: https
+        authentication: token
+        authorization: enduser-identity-propagation
+        tags:
+        vpn: true
+        ip_filtered: false
+        readonly: false
+        usage: business
+        data_assets_sent:
+          - client-billing-data
+        data_assets_received:
+          - client-billing-data
+
+trust_boundaries:
+
+  Public Internet:
+    id: public-internet
+    description: Public internet boundary
+    type: network-cloud-provider
+    tags:
+    technical_assets_inside:
+      - public-website
+      - vpn-gateway
+    trust_boundaries_nested:
+
+  Cloud Infrastructure:
+    id: cloud-infrastructure
+    description: AWS/Azure cloud infrastructure
+    type: network-cloud-provider
+    tags:
+      - aws
+      - cloud
+    technical_assets_inside:
+      - internal-network
+      - identity-provider
+      - web-app-server
+      - application-database
+      - cloud-file-storage
+    trust_boundaries_nested:
+
+  Client Devices:
+    id: client-devices
+    description: Employee and consultant devices
+    type: execution-environment
+    tags:
+    technical_assets_inside:
+      - consultant-laptops
+      - employee-workstations
+    trust_boundaries_nested:
+
+shared_runtimes:
+
+  Cloud Platform:
+    id: cloud-platform
+    description: AWS/Azure cloud platform
+    tags:
+      - aws
+      - cloud
+    technical_assets_running:
+      - web-app-server
+      - application-database
+      - cloud-file-storage
+      - identity-provider
+
+individual_risk_categories:
+
+  Weak Database Credentials:
+    id: weak-db-credentials
+    description: Legacy MS-Access database uses shared credentials (dbuser/Passw0rd)
+    impact: Unauthorized access to client billing and interaction records
+    asvs: V2 - Authentication
+    cheat_sheet: https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html
+    action: Replace MS-Access with secure cloud database with proper authentication
+    mitigation: Implement role-based access control with individual credentials and MFA
+    check: Verify no shared credentials exist in production systems
+    function: architecture
+    stride: elevation-of-privilege
+    detection_logic: Monitor for database access attempts with default credentials
+    risk_assessment: Critical risk due to shared credentials and lack of access control
+    false_positives: Legitimate admin access may trigger alerts
+    model_failure_possible_reason: false
+    cwe: 798
+    risks_identified:
+      <b>Shared Database Credentials</b> at <b>Application Database</b>:
+        severity: critical
+        exploitation_likelihood: very-likely
+        exploitation_impact: very-high
+        data_breach_probability: probable
+        data_breach_technical_assets:
+          - application-database
+        most_relevant_data_asset: client-billing-data
+        most_relevant_technical_asset: application-database
+        most_relevant_communication_link:
+        most_relevant_trust_boundary:
+        most_relevant_shared_runtime:
+
+  Unencrypted Laptop Data:
+    id: unencrypted-laptops
+    description: Consultant laptops lack full disk encryption
+    impact: Laptop theft could expose client deliverables and sensitive data
+    asvs: V8 - Data Protection
+    cheat_sheet: https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html
+    action: Implement full disk encryption (BitLocker) on all laptops
+    mitigation: Require full disk encryption and remote wipe capabilities
+    check: Verify all laptops have encryption enabled via MDM
+    function: operations
+    stride: information-disclosure
+    detection_logic: MDM reporting on encryption status
+    risk_assessment: High risk due to field work and potential laptop theft
+    false_positives: None
+    model_failure_possible_reason: false
+    cwe: 311
+    risks_identified:
+      <b>Unencrypted Laptops</b> at <b>Consultant Laptops</b>:
+        severity: high
+        exploitation_likelihood: likely
+        exploitation_impact: high
+        data_breach_probability: probable
+        data_breach_technical_assets:
+          - consultant-laptops
+        most_relevant_data_asset: client-deliverables
+        most_relevant_technical_asset: consultant-laptops
+        most_relevant_communication_link:
+        most_relevant_trust_boundary:
+        most_relevant_shared_runtime:
+
+risk_tracking:
+
+  weak-db-credentials@*:
+    status: in-progress
+    justification: Migrating to cloud database with proper RBAC
+    ticket: CYSE445-001
+    date: 2025-12-11
+    checked_by: Student
+
+  unencrypted-laptops@*:
+    status: in-progress
+    justification: Deploying full disk encryption via MDM
+    ticket: CYSE445-002
+    date: 2025-12-11
+    checked_by: Student
