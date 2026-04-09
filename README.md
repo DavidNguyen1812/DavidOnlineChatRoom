@@ -1,4 +1,4 @@
-# DavidOnlineChatRoom
+# David Online Chat Room
 
 An online chat room with hybrid encryption on RSA and AES-OCB using pycryptodome, an open source crypto library.
 The Server can be hosted on the cloud server like EC2 instances, .etc.
@@ -13,11 +13,13 @@ Server implemented time out for user used inappropriate language using better_pr
 
 **Required Python Dependencies**
 
+```
 pip install pycryptodome schedule dotenv -y
 
 Pycryptodome - The encryption process
 Schedule - For checking lock accounts and time out accounts
 dotenv - For loading environment variables from .env file
+```
 
 **Before Running the Scripts**
 
