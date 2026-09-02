@@ -1,0 +1,661 @@
+- Client Socket Connection Procedure:
+
++ Client -> Server
++ Asking the server to exchange it Public Key
++ Format: {"Message Code": "#0000"}
+
+
+Server -> Client
++ Ensure Client message is strictly == {"Message Code": "#0000"}
++ If not:
+    + Format: {"Message Code": "#0000", "Status Code": 400, "Error": Bad Request Error}
+Else:
+    + Format: {"Message Code": "#0000", "Status Code": 200, "Server Public Key": ServerPU}
+
+
++ Client -> Server
++ If status code == 400:
+    + Display Critical Pop-up Window Notify Bad Request Error
+    + Quit Application
++ If status code == 200:
+    + Checking the SHA512 hash of the server public key against the pre-shared hashed
+    + If not match:
+        + Display Critical Pop-up Window Notify A Potential Man-In-The-Middle attack due to server public key verification failure
+        + Quit Application
+    + Else:
+        + Accept the server PU
++ Asking the server to verify the client current source code
++ Obtain the SHA512 of the current client source code
++ Obtain the current client temp PU
++ Sign the HashedClientCode:ClientTempPU
++ Message: {"Message Code": "#0001", "Client Message: HashedClientCode:ClientTempPU, "Client Digital Signature": ClientSignature}
++ Randomly Generate AES key
++ AES-256 encrypt the message
++ Encrypt the AES-256 key with the server PU to obtain shared secret
++ Send SharedSecret:EncryptedPayload
+
+
++ Server -> Client
++ Check for client format to be exactly SharedSecret:EncryptedPayload
++ If Failed:
+    + Sign "Bad Request Error"
+    + Send Message: {"Status Code": 400, "Server Message": "Bad Request Error", "Server Digital Signature": serverSignature}
++ Else:
+    + Attempt decrypt the shared secret with the server private key
+    + If Decryption Failure:
+        + Sign "Server Can Not Decrypt the client-sent data"
+        + Send Message: {"Status Code": 500, "Server Message": "Server Can Not Decrypt the client-sent data", "Server Digital Signature": serverSignature}
+    + Else:
+        + Execute "Message Code" == "#0001" branch:
+            + Obtain Client Temp PU and source code hash
+            + Store Client Temp PU temporary for future communication with the client
+            + Verify client signature with the newly obtained client Temp PU
+            + If Verified:
+                + Check if hashed source code matched
+                + If hash matched:
+                    + Sign "Client Source Code Verification Success"
+                    + Message: {"Message Code": "#0001",  "Status Code": 200, "Server Message": "Client Source Code Verification Success", "Server Digital Signature": "serverSignature"}
+                    + Hybrid Encrypt the message to obtain shareSecret and cipherText
+                    + Send shareSecret:cipherText
+                + Else:
+                    + Obtain Correct Client source code from the server storage
+                    + Obtain the SHA-512 hash
+                    + Sign SourceCode:hash
+                    + Message: {"Message Code": "#0001", "Status Code": 202, "Server Message": "{clientSourceBytes}:{hashedClientSourceCode}", "Server Digital Signature": "{serverSignature}"}
+                    + Hybrid Encrypt the message to obtain shareSecret and cipherText
+                    + Send shareSecret:cipherText
+            + Else:
+                + Sign "Server Can Not Verify Client Digital Signature"
+                + Send Message: {"Status Code": 501, "Server Message": "Server Can Not Verify Client Digital Signature", "Server Digital Signature": serverSignature}
+
+
++ Client -> Server
++ Check if server message a valid json dict
++ If True:
+    + Check server signature:
+    + If Good:
+        + Check for all possible Status Code and inform user
+    + Else:
+        + Inform user about server digital signature verification failure
+    + Quit Application
++ Else:
+    + Check server message shareSecret:encryptedData
+    + If True:
+        + Attempt hybrid decrypt
+        + If Success:
+            + Check server signature:
+            + If Good:
+                + Execute Message Code == "#0001" branch:
+                    + If Status Code == 200:
+                        + Launch authentication form interface
+                        + Proceed to authentication procedure
+                    + If Status Code == 202:
+                        + Display an Information Pop-Up Window notify "Your current client source code does not match the server version. In order to continue, do you want to download the correct version?"
+                        + If No:
+                            + Tell user need to update to continue connection
+                        + Else:
+                            +  Download the source code
+                            +  Verify the download
+                            + If failed:
+                                + Display a Critical Pop-Up Window notify "Download Verification Failure"
+                            + Else:
+                                + Display a Notification Pop-Up Window notify "Download Success, please replace your source code with the downloaded version!"
+                        + Quit Application
+            + Else:
+                + Inform user about server digital signature verification failure
+                + Quit Application
+        + Else:
+            + Display a Critical Pop-Up Window notify Client Can Not Decrypt Server Data
+            + Quit Application
+    + Else:
+        + Display a Critical Pop-Up Window notify Client Can Not Decrypt Server Data
+        + Quit Application
+
+
+- Authentication procedure:
+
++ Client -> Server
++ Check username and password filled out
++ If True:
+    + Check password matched password policy
+    + If matched:
+        + SHA-512 hash password
+        + Sign userName:hashedPassword
+        + Message: {"Message Code": "#0002", "Client Message": userName:hashedPassword, "Client Digital Signature": ClientSignature}
+        + Hybrid Encrypt the message to obtain shareSecret and cipherText
+        + Send shareSecret:cipherText
+    + Else:
+        + Display "Password must at least 12 characters!\nHave mixed case ASCII letters and numbers\nContains any of the following special characters !@#$%&*_+="
++ Else:
+    + Display "Username and Password field can not be empty!"
+
+
++ Server -> Client
++ Check for client format to be exactly SharedSecret:EncryptedPayload
++ If Failed:
+    + Sign "Bad Request Error"
+    + Send Message: {"Status Code": 400, "Server Message": "Bad Request Error", "Server Digital Signature": serverSignature}
++ Else:
+    + Attempt decrypt the shared secret with the server private key
+    + If Decryption Failure:
+        + Sign "Server Can Not Decrypt the client-sent data"
+        + Send Message: {"Status Code": 500, "Server Message": "Server Can Not Decrypt the client-sent data", "Server Digital Signature": serverSignature}
+    + Else:
+        + Verify client signature with the client Temp PU
+        + If Verified:
+                + Obtain client username and hashed password
+                + Check if client username already registered
+                + If Registed:
+                    + Check if account is currently locked:
+                    + If Not:
+                        + Verify the password hash
+                        + If match:
+                            + Sign "Authentication Success!"
+                            + Message: {"Message Code": "#0002", "Status Code": 200, "Server Message": "Authentication Success!", "Server Digital Signature": serverSignature}
+                        + else:
+                            + Check if current allow failed attempt < 0:
+                            + If True:
+                                + Set account lock to 3hr
+                                + Update account lock history
+                                + Sign "Too Many Invalid Log In Attempt!\nAccount is locked for 3 hr!"
+                                + Message: {"Message Code": "#0002", "Status Code": 401, "Server Message": "Too Many Invalid Log In Attempt!\nAccount is locked for 3 hr!", "Server Digital Signature": serverSignature}
+                            + Else:
+                                + Decrement the current allow failed login attempt by 1
+                                + Sign "Invalid Credential Provided! You have currnetLogInAttempt remaining"
+                                + Message: {"Message Code": "#0002", "Status Code": 401, "Server Message": "Invalid Credential Provided! You have currnetLogInAttempt remaining", "Server Digital Signature": serverSignature}
+                    + Else:
+                        + Sign "Your account is currently locked for {hr}:{min}{sec}"
+                        + Message: {"Message Code": "#0002", "Status Code": 403, "Server Message": "Your account is currently locked for {hr}:{min}{sec}", "Server Digital Signature": serverSignature}
+                + Else:
+                    + Sign "There is no registered account with user name userName yet!"
+                    + Message: {"Message Code": "#0002", "Status Code": 401, "Server Message": "There is no registered account with the user name 'userName' yet!", "Server Digital Signature": serverSignature}
+                + Hybrid Encrypt the message to obtain shareSecret and cipherText
+                + Send shareSecret:cipherText
+        + Else:
+            + Sign "Server Can Not Verify Client Digital Signature"
+            + Send Message: {"Status Code": 501, "Server Message": "Server Can Not Verify Client Digital Signature", "Server Digital Signature": serverSignature}
+
++ Client -> Server
++ Check if server message a valid json dict
++ If True:
+    + Check server signature:
+    + If Good:
+        + Check for all possible Status Code and inform user
+    + Else:
+        + Inform user about server digital signature verification failure
+    + Quit Application
++ Else:
+    + Check server message shareSecret:encryptedData
+    + If True:
+        + Attempt hybrid decrypt
+        + If Success:
+            + Check server signature:
+            + If Good:
+                + Execute Message Code == "#0002" branch:
+                    + If "Message Code" == 200:
+                        + Obtain the SHA-512 hash of the current client PERMANENT PU not temp
+                        + Sign the hash with the temp PU
+                        + Message: {"Message Code": "#0003", "Client Message": "hash", "Client Digital Signature": "ClientSignature"}
+                        + Hybrid Encrypt the message to obtain shareSecret and cipherText
+                        + Send shareSecret:cipherText
+                        (NOTE: If the server stored the valid permanent public key with this client, the hash should matched, else the server know that even the client credential are correct, it public key failed the final authentication)
+                    + Elif "Message Code" == 401:
+                        + If Server Message.startswith("Invalid Credential Provided!"):
+                            + Display server message in the form
+                        + Elif Server Message.startswith("Too Many Invalid Log In Attempt!"):
+                            + Display server message in the form
+                            + Locked Form
+                            + Wait two second
+                            + Quit Application
+                        + Elif Server Message.startswith("There is no registered account with user name"):
+                            + Display information pop up notify the user "There is no registered account with user name [{clientUserName}] yet! Do you want to register the account with the credential provided?"
+                            + If No:
+                                + Display information pop up notify the user "You must have a registered account in order to continue using the application!"
+                                + Quit Application
+                            + Else:
+                                + Obtain the permanent client RSA private and RSA public key
+                                + Sign "clientUserName:hashsed:clientPU"
+                                + Message: {"Message Code": "#0003", "Client Message": "clientUserName:hashsed:clientPU", "Client Digital Signature": "ClientSignature"}
+                                + Hybrid Encrypt the message to obtain shareSecret and cipherText
+                                + Send shareSecret:cipherText
+                    + Elif "Message Code" == 403:
+                        + Display server message in the form
+                        + Locked Form
+                        + Wait two second
+                        + Quit Application
+            + Else:
+                + Inform user about server digital signature verification failure
+                + Quit Application
+        + Else:
+            + Display a Critical Pop-Up Window notify Client Can Not Decrypt Server Data
+            + Quit Application
+    + Else:
+        + Display a Critical Pop-Up Window notify Client Can Not Decrypt Server Data
+        + Quit Application
+
+
++ Server -> Client
++ Check for client format to be exactly SharedSecret:EncryptedPayload
++ If Failed:
+    + Sign "Bad Request Error"
+    + Send Message: {"Status Code": 400, "Server Message": "Bad Request Error", "Server Digital Signature": serverSignature}
++ Else:
+    + Attempt decrypt the shared secret with the server private key
+    + If Decryption Failure:
+        + Sign "Server Can Not Decrypt the client-sent data"
+        + Send Message: {"Status Code": 500, "Server Message": "Server Can Not Decrypt the client-sent data", "Server Digital Signature": serverSignature}
+    + Else:
+        + Verify client signature with the client Temp PU
+        + If Verified:
+            + Split client by ':'
+            + If len == 3:
+                + Obtain client username, SHA512 hash password, client permanent public key
+                + Register the account
+                + Sign "New Account Registration Successful!"
+                + Message: {"Message Code": "#0003", "Status Code": 200, "Server Message": "New Account Registration Successful!", "Server Digital Signature": "serverSignature"}
+            + Else:
+                + Look up for registered permanent public key of the client stored on server side
+                + Obtain SHA512 hash
+                + Compare hash with the client hash:
+                + If not matched:
+                    + Sign "Client Account Public Key Verification Error!"
+                    + Message: {"Message Code": "#0003", "Status Code": 403, "Server Message": "Client Account Public Key Verification Error!", "Server Digital Signature": "serverSignature"}
+                + ELse:
+                    + Sign "Logging Successful!"
+                    + Message: {"Message Code": "#0003", "Status Code": 200, "Server Message": "Logging Successful!", "Server Digital Signature": "serverSignature"}
+            + Hybrid Encrypt the message to obtain shareSecret and cipherText
+            + Send shareSecret:cipherText
+        + Else:
+            + Sign "Server Can Not Verify Client Digital Signature"
+            + Send Message: {"Status Code": 501, "Server Message": "Server Can Not Verify Client Digital Signature", "Server Digital Signature": serverSignature}
+
++ Client -> Server
++ Check if server message a valid json dict
++ If True:
+    + Check server signature:
+    + If Good:
+        + Check for all possible Status Code and inform user
+    + Else:
+        + Inform user about server digital signature verification failure
+    + Quit Application
++ Else:
+    + Check server message shareSecret:encryptedData
+    + If True:
+        + Attempt hybrid decrypt
+        + If Success:
+            + Check server signature:
+            + If Good:
+                + Execute Message Code == "#0003" branch:
+                    + Display Server Message on the authentication form
+                    + If Status Code == 200:
+                        + Proceed to launch the main window
+                    + Close the authentication form
+            + Else:
+                + Inform user about server digital signature verification failure
+                + Quit Application
+        + Else:
+            + Display a Critical Pop-Up Window notify Client Can Not Decrypt Server Data
+            + Quit Application
+    + Else:
+        + Display a Critical Pop-Up Window notify Client Can Not Decrypt Server Data
+        + Quit Application
+
+- Initial Server Data Request after authentication
+
++ Client -> Server
++ Sign "Tung Tung Tung Sahur Request COU, FL, and PN" with temp PI
++ Message: {"Message Code": "#0004", "Client Message": "Tung Tung Tung Sahur Request COU, FL, and PN", "Client Digital Signature": clientSignature}
++ Hybrid Encrypt the message to obtain shareSecret and cipherText
++ Send shareSecret:cipherText
+
++ Server -> Client
++ Check for client format to be exactly SharedSecret:EncryptedPayload
++ If Failed:
+    + Sign "Bad Request Error"
+    + Send Message: {"Status Code": 400, "Server Message": "Bad Request Error", "Server Digital Signature": serverSignature}
++ Else:
+    + Attempt decrypt the shared secret with the server private key
+    + If Decryption Failure:
+        + Sign "Server Can Not Decrypt the client-sent data"
+        + Send Message: {"Status Code": 500, "Server Message": "Server Can Not Decrypt the client-sent data", "Server Digital Signature": serverSignature}
+    + Else:
+        + If Message Code == "#0004" branch:
+            + Retrieve all current online users and their relationship with the client
+            + Format: {username, relationship} -> allOnlineUsers (dict)
+            + Retrieve all client friends and their online status
+            + Format: [{"name": username, "online": True/False}] -> clientFriendsOnlineStatus (list)
+            + Retrieve all client pending notifications
+            + Format: {"unread_messages": [{username, unreadCount}], "friend_request": [username], "request_accepted": [username], "request_rejected": [username]}} -> notifications (dict)
+            + ServerMsg: {"Current Online Users": allOnlineUsers, "Current Friend List": clientFriendsOnlineStatus, "Current Pending Notifications": notifications}
+            + Sign ServerMsg -> serverSignature
+            + {'Message Code': '#0004", "Status Code": 200, "Server Message": Message, "Server Digital Signature": serverSignature}
+            + Encrypt with client temp PI and send
+
++ Client Receive BigBoyData
++ Check if server message a valid json dict
++ If True:
+    + Check server signature:
+    + If Good:
+        + Check for all possible Status Code and inform user
+    + Else:
+        + Inform user about server digital signature verification failure
+    + Quit Application
++ Else:
+    + Check server message shareSecret:encryptedData
+    + If True:
+        + Attempt hybrid decrypt
+        + If Success:
+            + Check server signature:
+            + If Good:
+                + Execute Message Code == "#0004" branch:
+                    + Update the GUI Friend Lists, Current Online Users, and pending notifications
+            + Else:
+                + Inform user about server digital signature verification failure
+                + Quit Application
+        + Else:
+            + Display a Critical Pop-Up Window notify Client Can Not Decrypt Server Data
+            + Quit Application
+    + Else:
+        + Display a Critical Pop-Up Window notify Client Can Not Decrypt Server Data
+        + Quit Application
+
+- Client select a friend to chat
+
++ Client -> Server
++ Sign the friendUserName with client PI
++ Message: {"Message Code": "#0005", "Client Message": friendUsername, "Client Digital Signature": clientSignature}
++ Server hybrid encrypt and send
+
++ Server -> Client
++ Check for client format to be exactly SharedSecret:EncryptedPayload
++ If Failed:
+    + Sign "Bad Request Error"
+    + Send Message: {"Status Code": 400, "Server Message": "Bad Request Error", "Server Digital Signature": serverSignature}
++ Else:
+    + Attempt decrypt the shared secret with the server private key
+    + If Decryption Failure:
+        + Sign "Server Can Not Decrypt the client-sent data"
+        + Send Message: {"Status Code": 500, "Server Message": "Server Can Not Decrypt the client-sent data", "Server Digital Signature": serverSignature}
+    + Else:
+        + If Message Code == "#0005" branch:
+            + Obtain the client requested friend registered PU -> friendRegPU (str)
+            + Obtain the client encrypted chat history with the friend -> clientChatHistory (list)
+            + Message: {"Friend Registered PU": friendRegPU, "Encrypted Chat History": clientChatHistory}
+            + Sign Message with server PI
+            + {"Message Code": "#0005", "Status Code": 200, "Server Message": Message, "Server Digital Signature": serverSignature}
+            + Encrypt and send
+
++ Client Received
++ Check if server message a valid json dict
++ If True:
+    + Check server signature:
+    + If Good:
+        + Check for all possible Status Code and inform user
+    + Else:
+        + Inform user about server digital signature verification failure
+    + Quit Application
++ Else:
+    + Check server message shareSecret:encryptedData
+    + If True:
+        + Attempt hybrid decrypt
+        + If Success:
+            + Check server signature:
+            + If Good:
+                + Execute Message Code == "#0005" branch:
+                    + Extract the friend PU and temporary store
+                    + Extract the encrypted chat history
+                    + Decrypt and verify the chat history using client PERMANENT PRIVATE KEY
+            + Else:
+                + Inform user about server digital signature verification failure
+                + Quit Application
+        + Else:
+            + Display a Critical Pop-Up Window notify Client Can Not Decrypt Server Data
+            + Quit Application
+    + Else:
+        + Display a Critical Pop-Up Window notify Client Can Not Decrypt Server Data
+        + Quit Application
+
+- Client sent a message to a friend
+
++ Client -> Server
++ Sign Message with Permanent PI -> senderSignature
++ Message now {"Message": message, "Sender Signature": senderSignature}
++ Generate random AES-256 key, Encrypt Message with the AES-256 key -> EncryptedMessage
++ Encrypt AES-256 key with client permanent PU -> keyForSelf
++ Encrypt AES-256 key with the recipient permanent PU -> keyForRecipient
++ finalMessage = {"To": recipient, "Date": date, "Message": EncryptedMessage, "Key For Self": keyForSelf, "Key For Recipient": keyForRecipient}
++ Sign finalMessage with temp PI -> clientSignature
++ finalMessageToServer = {"Message Code": "#0006", "Client Message": finalMessage, "Client Digital Signature": clientSignature}
++ serverHybridEncrypt(finalMessageToServer) -> sharedSecret, encryptedMessage
++ Send sharedSecret:encryptedMessage to server
+
++ Server Received
++ Check for client format to be exactly SharedSecret:EncryptedPayload
++ If Failed:
+    + Sign "Bad Request Error"
+    + Send Message: {"Status Code": 400, "Server Message": "Bad Request Error", "Server Digital Signature": serverSignature}
++ Else:
+    + Attempt decrypt the shared secret with the server private key
+    + If Decryption Failure:
+        + Sign "Server Can Not Decrypt the client-sent data"
+        + Send Message: {"Status Code": 500, "Server Message": "Server Can Not Decrypt the client-sent data", "Server Digital Signature": serverSignature}
+    + Else:
+        + If Message Code == "#0006" branch:
+            + clientMsg = {"To": recipient, "Date": date, "Message": EncryptedMessage, "Key For Self": keyForSelf, "Key For Recipient": keyForRecipient}
+            + Store clientMsg in the client and recipient encrypted chat history list
+            + Obtain the recipient username
+            + Check if recipient is currently online and interacting with sender:
+            + If True:
+               + Sign clientMsg with server PI
+               + {"Message Code": "#0006", "Status Code": 200, "Server Message": clientMsg, "Server Digital Signature": serverSignature}
+               + Encrypt and send recipient
+            + Else:
+               + Update the pending unread message from client on the recipient
+            + Sign "Message Deliver Success!" with serverPI
+            + {"Message Code": "#0006", "Status Code": 200, "Server Message": "Message Deliver Success!", "Server Digital Signature": serverSignature}
+            + Encrypt and send to the message author
+
+- Client received encrypted message from other client sent by server
++ Check if server message a valid json dict
++ If True:
+    + Check server signature:
+    + If Good:
+        + Check for all possible Status Code and inform user
+    + Else:
+        + Inform user about server digital signature verification failure
+    + Quit Application
++ Else:
+    + Check server message shareSecret:encryptedData
+    + If True:
+        + Attempt hybrid decrypt
+        + If Success:
+            + Check server signature:
+            + If Good:
+                + Execute Message Code == "#0006" branch:
+                    + User permanent PI to decrypt "Key For Self"
+                    + Use that to decrypt for the AES key
+                    + Use the AES key to decrypt for the original message
+                    + Use the sender permanent PU to verify the sender signature
+                    + If Success:
+                        + Display the message to the GUI
+                    + Else:
+                        + Display DS verification error
+                        + Quit Application
+            + Else:
+                + Inform user about server digital signature verification failure
+                + Quit Application
+        + Else:
+            + Display a Critical Pop-Up Window notify Client Can Not Decrypt Server Data
+            + Quit Application
+    + Else:
+        + Display a Critical Pop-Up Window notify Client Can Not Decrypt Server Data
+        + Quit Application
+
+- A new client authenticated and connect
+
++ Server -> all the current online clients
++ Check for the new connected client status relationship with other client
++ Message = {"New Client Connected": clientUserName, "Relationship": Friend or Pending Friend Invitation or None}
++ Sign Message with the server PI
++ serverMsg = {"Message Code": "#0007", "Server Message": Message, "Server Digital Signature": serverSignature}
++ Encrypt and send to all each already authenticated client
+
++ Client Received
++ Check if server message a valid json dict
++ If True:
+    + Check server signature:
+    + If Good:
+        + Check for all possible Status Code and inform user
+    + Else:
+        + Inform user about server digital signature verification failure
+    + Quit Application
++ Else:
+    + Check server message shareSecret:encryptedData
+    + If True:
+        + Attempt hybrid decrypt
+        + If Success:
+            + Check server signature:
+            + If Good:
+                + Execute Message Code == "#0007" branch:
+                    + Get "New Connected User" username
+                    + Get the relationship
+                    + Update the GUI
+            + Else:
+                + Inform user about server digital signature verification failure
+                + Quit Application
+        + Else:
+            + Display a Critical Pop-Up Window notify Client Can Not Decrypt Server Data
+            + Quit Application
+    + Else:
+        + Display a Critical Pop-Up Window notify Client Can Not Decrypt Server Data
+        + Quit Application
+
+
+- An authenticated client disconnect
+
++ Server -> all the current online clients
++ Sign the disconnected client username
++ serverMsg = {"Message Code": "#0008", "Server Message": clientUserName, "Server Digital Signature": serverSignature}
++ Encrypt and send to all each already authenticated client
+
++ Client Received
++ Check if server message a valid json dict
++ If True:
+    + Check server signature:
+    + If Good:
+        + Check for all possible Status Code and inform user
+    + Else:
+        + Inform user about server digital signature verification failure
+    + Quit Application
++ Else:
+    + Check server message shareSecret:encryptedData
+    + If True:
+        + Attempt hybrid decrypt
+        + If Success:
+            + Check server signature:
+            + If Good:
+                + Execute Message Code == "#0008" branch:
+                    + Get the disconnected user name
+                    + Update the GUI (If user is friend, then update the online circle status. The online user list is removed)
+            + Else:
+                + Inform user about server digital signature verification failure
+                + Quit Application
+        + Else:
+            + Display a Critical Pop-Up Window notify Client Can Not Decrypt Server Data
+            + Quit Application
+    + Else:
+        + Display a Critical Pop-Up Window notify Client Can Not Decrypt Server Data
+        + Quit Application
+
+
+- Server send live notification to client
++ Message: {"Notification Type": notifType, "From": clientUserName}
++ Sign Message
++ serverMsg = {"Message Code": "#0009", "Server Message": Message, "Server Digital Signature": serverSignature}
++ Encrypt and send
+
++ Client Received
++ Check if server message a valid json dict
++ If True:
+    + Check server signature:
+    + If Good:
+        + Check for all possible Status Code and inform user
+    + Else:
+        + Inform user about server digital signature verification failure
+    + Quit Application
++ Else:
+    + Check server message shareSecret:encryptedData
+    + If True:
+        + Attempt hybrid decrypt
+        + If Success:
+            + Check server signature:
+            + If Good:
+                + Execute Message Code == "#0009" branch:
+                    + Update the notifications GUI
+            + Else:
+                + Inform user about server digital signature verification failure
+                + Quit Application
+        + Else:
+            + Display a Critical Pop-Up Window notify Client Can Not Decrypt Server Data
+            + Quit Application
+    + Else:
+        + Display a Critical Pop-Up Window notify Client Can Not Decrypt Server Data
+        + Quit Application
+
+- Client Read Notification
+
++ Message = {"Notification Type": notifType, "From": clientUserName}
++ Sign Message
++ clientMsg = {"Message Code": "#0010", "Client Message": Message, "Client Digital Signature": clientSignature}
++ Encrypt and send to server
+
+- Client make a pending friend request decision
++ Message = {"Notification Type": "request_accepted or request_rejected", "From": clientUserName}
++ Sign Message
++ clientMsg = {"Message Code": "#0010", "Client Message": Message, "Client Digital Signature": clientSignature}
++ Encrypt and send to server
+
++ Server Received
++ Check for client format to be exactly SharedSecret:EncryptedPayload
++ If Failed:
+    + Sign "Bad Request Error"
+    + Send Message: {"Status Code": 400, "Server Message": "Bad Request Error", "Server Digital Signature": serverSignature}
++ Else:
+    + Attempt decrypt the shared secret with the server private key
+    + If Decryption Failure:
+        + Sign "Server Can Not Decrypt the client-sent data"
+        + Send Message: {"Status Code": 500, "Server Message": "Server Can Not Decrypt the client-sent data", "Server Digital Signature": serverSignature}
+    + Else:
+        + If Message Code == "#0010" branch:
+            + Update user pending notifcation logs
+
++ Client received the server-side notification update ACK
++ Verify the status code is 200 and message is "Notification Update"
++ If Not:
+    + Show client decryption error
+    + Quit Application
+
+
+- Client make a friend request
++ Sign "FriendUserName"
++ Message {"Message Code": "#0011", "Client Message": username, "Client Digital Signature": clientSignature}
++ Encrypt and send
+
+- Server Received
++ Check for client format to be exactly SharedSecret:EncryptedPayload
++ If Failed:
+    + Sign "Bad Request Error"
+    + Send Message: {"Status Code": 400, "Server Message": "Bad Request Error", "Server Digital Signature": serverSignature}
++ Else:
+    + Attempt decrypt the shared secret with the server private key
+    + If Decryption Failure:
+        + Sign "Server Can Not Decrypt the client-sent data"
+        + Send Message: {"Status Code": 500, "Server Message": "Server Can Not Decrypt the client-sent data", "Server Digital Signature": serverSignature}
+    + Else:
+        + If Message Code == "#0011" branch:
+            + Update the pending request notification
+            + If the other client online:
+                + notificationMessage = {"Notification Type": "friend_request", "From": clientUserName}
+                + Sign notificationMessage
+                + {"Message Code": "#0009", "Server Message": notificationMessage, "Server Digital Signature": serverSignature}
+                + Encrypt and send to the destined client
