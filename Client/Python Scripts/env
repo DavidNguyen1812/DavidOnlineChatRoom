@@ -1,7 +1,0 @@
-CensoredWords=/path/to/Client/CensoredWords/censored_wordlist.txt
-ClientPI=/path/to/Client/RSAKeys/ClientRSAprivateKey.pem
-ClientPU=/path/to/Client/RSAKeys/ClientRSApublicKey.pem
-ClientSourceCode=/path/to/Client/Python Scripts/client.py
-PORT=3200
-ServerIP=Your Server IP
-ServerPU=/path/to/Client/RSAKeys/ServerRSApublicKey.pem
