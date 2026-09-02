@@ -1,0 +1,1 @@
+Run the generateServerRSAkeys.py in the Asset/ folder to generate an RSA key pair and update the client.py for distribution

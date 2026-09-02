@@ -1,0 +1,32 @@
+{
+    "DavidNguyen1812": {
+        "Password": "1b2602eeaf1842698c011cb92c5fbd0d35d7cdef9233d80322c31a64f767cdd665e59fdf8a3eae5433c6ee8dc83b9eab01c0f86f30ff3db412d1e56003c1410f",
+        "Last Log In": "Wed Sep  2 15:35:24 2026",
+        "Current Lock Out Time": 0,
+        "Locked Out Record": [],
+        "Friends": [
+            "TheGoldenHarp2024",
+            "Cody Arthur"
+        ]
+    },
+    "TheGoldenHarp2024": {
+        "Password": "640abc6c841298ebb00823cadb0397c4422cf78dde054832e26f89270fb62a0d86f4113e1636a70cabbdf40c6d23f1a1ece900ec14be3db8f792fcfb7ac89d26",
+        "Last Log In": "Wed Sep  2 14:45:24 2026",
+        "Current Lock Out Time": 0,
+        "Locked Out Record": [],
+        "Friends": [
+            "DavidNguyen1812",
+            "Cody Arthur"
+        ]
+    },
+    "Cody Arthur": {
+        "Password": "6ff7371faba2532cef81b8125f222d73a72c9073be4926a0b3ebc1a6b48f30d78108bb05e834623f5ce05e47a4144de885f591b0dd0f04205e4b2c3fb82c4f9d",
+        "Last Log In": "Wed Sep  2 14:43:56 2026",
+        "Current Lock Out Time": 0,
+        "Locked Out Record": [],
+        "Friends": [
+            "DavidNguyen1812",
+            "TheGoldenHarp2024"
+        ]
+    }
+}
