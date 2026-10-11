@@ -23,16 +23,16 @@ HEADER = 64 # HEADER value must match the server header value
 PORT = 3200 # Client port number must match the server port to have a successful socket connection
 SERVER_IP = '127.0.0.1' # Server IP must be a public IP and valid and the server must be up to have a successful socket connection
 ROOT_DIR = pathlib.Path(__file__).parent.parent.absolute()
-SERVER_PUBLIC_KEY = ROOT_DIR / "RSAKeys" / "ServerPU" / "ServerRSApublicKey.pem"
-CLIENT_TEMP_PUBLIC_KEY = ROOT_DIR / "RSAKeys" / "Ephemeral" / "ClientRSApublicKey.pem"
-CLIENT_TEMP_PRIVATE_KEY = ROOT_DIR / "RSAKeys" / "Ephemeral" / "ClientRSAprivateKey.pem"
-CLIENT_PERMANENT_PUBLIC_KEY = ROOT_DIR / "RSAKeys" / "Permanent" / "ClientRSApublicKey.pem"
-CLIENT_PERMANENT_PRIVATE_KEY = ROOT_DIR / "RSAKeys" / "Permanent" / "ClientRSAprivateKey.pem"
+SERVER_PUBLIC_KEY = str(ROOT_DIR / "RSAKeys" / "ServerPU" / "ServerRSApublicKey.pem")
+CLIENT_TEMP_PUBLIC_KEY = str(ROOT_DIR / "RSAKeys" / "Ephemeral" / "ClientRSApublicKey.pem")
+CLIENT_TEMP_PRIVATE_KEY = str(ROOT_DIR / "RSAKeys" / "Ephemeral" / "ClientRSAprivateKey.pem")
+CLIENT_PERMANENT_PUBLIC_KEY = str(ROOT_DIR / "RSAKeys" / "Permanent" / "ClientRSApublicKey.pem")
+CLIENT_PERMANENT_PRIVATE_KEY =str(ROOT_DIR / "RSAKeys" / "Permanent" / "ClientRSAprivateKey.pem")
 CLIENT_SOURCE_CODE = pathlib.Path(__file__).absolute()
 CURRENT_FRIEND_PUBLIC_KEY = f"{ROOT_DIR / "RSAKeys" / "CurrentFriendPU"}/"
 
 # DO NOT MODIFY THIS
-SERVERPUBLICKEYHASH = "ac4be125efca13f64222bd9753122a332df397502a77bfc7a4f0af662a085fd35f20c2748aec296900f9d3c4204cf6813dfe5cac745fc347c50e00eebffcc7dc"
+SERVERPUBLICKEYHASH = "3d33af6e392df3dd32584e5a74549790ec0ded67fc7dd95ce56ba7a8cb85208fab54479e722f2d2f16488c3b2c66ec4e9ac624c947a4a4732d5d678e2506d16d"
 
 STATUS = "FIRST CONNECTION"
 USERNAME = ''
@@ -40,6 +40,14 @@ PASSWORDCHECK = False
 
 client_reader = None
 client_writer = None
+message_counter = 0
+
+def nextCounter() -> int:
+    """Monotonic per-connection message counter (Safeguard against replay attack)."""
+    global message_counter
+    message_counter += 1
+    return message_counter
+
 
 if os.path.exists(CLIENT_TEMP_PRIVATE_KEY):
     os.remove(CLIENT_TEMP_PRIVATE_KEY)
@@ -129,7 +137,6 @@ def serverHybridDecryption(sharedSecret: str, cipherText: str) -> Tuple[bool, st
     Description: Perform a hybrid decryption of AES-256 and RSA-4096 data received from server
     :param sharedSecret: Base64 encoded RSA-encrypted key bundle
     :param cipherText: Base64 encoded AES-encrypted data
-    :param key: Which private key to use (Temp/Perm)
     :return: Decryption Status, Decrypted original string
     """
     try:
@@ -249,6 +256,7 @@ def aesDecryption(aesKeyBundle: str, cipherText: str) -> Tuple[bool, str]:
 class ThreadSignals(QObject):
     server_connection_error = Signal()
     bad_request = Signal()
+    invalid_request = Signal()
     server_pu_verification_failure = Signal()
     sending_source_code_and_temp_pu = Signal()
     server_ds_verification_failure = Signal()
@@ -316,6 +324,8 @@ async def receiveMessage() -> None:
                     if await asyncio.to_thread(DigitalSignatureVerification, serverMsg.get("Server Digital Signature", ''), serverMsg.get("Server Message", ''), SERVER_PUBLIC_KEY):
                         if serverMsg.get("Status Code", 0) == 400:
                             signals.bad_request.emit()
+                        elif serverMsg.get("Status Code", 0) == 401:
+                            signals.invalid_request.emit()
                         elif serverMsg.get("Status Code", 0) == 500:
                             signals.server_decryption_failure.emit()
                         elif serverMsg.get("Status Code", 0) == 501:
@@ -344,11 +354,13 @@ async def receiveMessage() -> None:
                                     statusCode = serverMsg.get("Status Code", 0)
                                     serverMessage = serverMsg.get("Server Message", "")
                                     if statusCode == 200:
+                                        authChallenge = serverMsg.get("Auth Challenge", "")
                                         with open(CLIENT_PERMANENT_PUBLIC_KEY, 'rb') as clientPU:
                                             clientPermPU = clientPU.read()
                                         hashedClientPermPU = hashlib.sha512(clientPermPU).hexdigest()
-                                        clientSignature = await asyncio.to_thread(clientDigitalSignature, hashedClientPermPU,CLIENT_TEMP_PRIVATE_KEY)
-                                        clientMsg = json.dumps({"Message Code": "#0003", "Client Message": f"{hashedClientPermPU}", "Client Digital Signature": f"{clientSignature}"})
+                                        permSignature = await asyncio.to_thread(clientDigitalSignature, f"{hashedClientPermPU}:{authChallenge}", CLIENT_PERMANENT_PRIVATE_KEY)
+                                        clientSignature = await asyncio.to_thread(clientDigitalSignature, f"{hashedClientPermPU}:{authChallenge}:{permSignature}:Confirm Login", CLIENT_TEMP_PRIVATE_KEY)
+                                        clientMsg = json.dumps({"Message Code": "#0003", "Client Message": f"{hashedClientPermPU}:{authChallenge}:{permSignature}:Confirm Login", "Counter": nextCounter(), "Client Digital Signature": f"{clientSignature}"})
                                         sharedSecret, cipherText = await asyncio.to_thread(serverHybridEncryption,clientMsg)
                                         await sendMessageToServer(f"{sharedSecret}:{cipherText}")
                                     elif statusCode == 401 or statusCode == 403:
@@ -617,9 +629,8 @@ class AuthenticationForm(QDialog):
                 self.showInfoMessage("Password must at least 12 characters!\nHave mixed case ASCII letters and numbers!\nHave any of the following special characters below:\n@#$%&*_+=")
                 self.lockedFormInput(False)
             else:
-                hashedPassword = hashlib.sha512(f"{username}:{password}".encode()).hexdigest()
-                clientSignature = await asyncio.to_thread(clientDigitalSignature, f"{username}:{hashedPassword}", CLIENT_TEMP_PRIVATE_KEY)
-                clientMsg = json.dumps({"Message Code": "#0002", "Client Message": f"{username}:{hashedPassword}", "Client Digital Signature": f"{clientSignature}"})
+                clientSignature = await asyncio.to_thread(clientDigitalSignature, f"{username}:{password}", CLIENT_TEMP_PRIVATE_KEY)
+                clientMsg = json.dumps({"Message Code": "#0002", "Client Message": f"{username}:{password}", "Counter": nextCounter(), "Client Digital Signature": f"{clientSignature}"})
                 sharedSecret, cipherText = await asyncio.to_thread(serverHybridEncryption, clientMsg)
                 await sendMessageToServer(f"{sharedSecret}:{cipherText}")
         else:
@@ -666,9 +677,8 @@ class AuthenticationForm(QDialog):
         with open(CLIENT_PERMANENT_PUBLIC_KEY, 'rb') as clientPU:
             clientPermPU = clientPU.read()
         clientPermPU = base64.b64encode(clientPermPU).decode('ascii')
-        hashedPassword = hashlib.sha512(f"{username}:{password}".encode()).hexdigest()
-        clientSignature = await asyncio.to_thread(clientDigitalSignature, f"{username}:{hashedPassword}:{clientPermPU}", CLIENT_TEMP_PRIVATE_KEY)
-        clientMsg = json.dumps({"Message Code": "#0003", "Client Message": f"{username}:{hashedPassword}:{clientPermPU}", "Client Digital Signature": f"{clientSignature}"})
+        clientSignature = await asyncio.to_thread(clientDigitalSignature, f"{username}:{password}:{clientPermPU}:Register", CLIENT_TEMP_PRIVATE_KEY)
+        clientMsg = json.dumps({"Message Code": "#0003", "Client Message": f"{username}:{password}:{clientPermPU}:Register", "Counter": nextCounter(), "Client Digital Signature": f"{clientSignature}"})
         sharedSecret, cipherText = await asyncio.to_thread(serverHybridEncryption, clientMsg)
         await sendMessageToServer(f"{sharedSecret}:{cipherText}")
 
@@ -774,6 +784,7 @@ class MessagingApp(QMainWindow):
         QGuiApplication.styleHints().colorSchemeChanged.connect(self.applyColoringTheme)
         signals.server_connection_error.connect(self.showServerConnectionError)
         signals.bad_request.connect(self.showBadRequestError)
+        signals.invalid_request.connect(self.showInvalidRequestError)
         signals.server_pu_verification_failure.connect(self.showPUVerificationError)
         signals.sending_source_code_and_temp_pu.connect(self.sendingClientSourceCodeAndTempPU)
         signals.server_ds_verification_failure.connect(self.serverDSVerificationError)
@@ -1006,18 +1017,22 @@ class MessagingApp(QMainWindow):
         self.show_critical_error_and_close("Bad Request Error", "The server returned a Bad Request (Status Code 400).")
 
     @Slot()
+    def showInvalidRequestError(self):
+        self.show_critical_error_and_close("Invalid Request Error", "Your request is not Not Accepted (Status Code 401).")
+
+    @Slot()
     def showPUVerificationError(self):
-        self.show_critical_error_and_close("Server Public Key Verification Error", "A Potential Man-In-The-Middle attack due to server public key verification failure.")
+        self.show_critical_error_and_close("Server Public Key Verification Error", "Server Public Key Verification Failure!")
 
     @asyncSlot()
     async def sendingClientSourceCodeAndTempPU(self):
         with open(CLIENT_SOURCE_CODE, 'rb') as file:
-            hashedClientSourceCode = hashlib.sha512(file.read()).hexdigest()
+            base64ClientSourceCode = base64.b64encode(file.read()).decode('ascii')
         with open(CLIENT_TEMP_PUBLIC_KEY, 'rb') as clientPU:
             clientTempPU = clientPU.read()
         clientTempPU = base64.b64encode(clientTempPU).decode('ascii')
-        clientSignature = await asyncio.to_thread(clientDigitalSignature, f"{hashedClientSourceCode}:{clientTempPU}", CLIENT_TEMP_PRIVATE_KEY)
-        clientMsg = json.dumps({"Message Code": "#0001", "Client Message": f"{hashedClientSourceCode}:{clientTempPU}", "Client Digital Signature": f"{clientSignature}"})
+        clientSignature = await asyncio.to_thread(clientDigitalSignature, f"{base64ClientSourceCode}:{clientTempPU}", CLIENT_TEMP_PRIVATE_KEY)
+        clientMsg = json.dumps({"Message Code": "#0001", "Client Message": f"{base64ClientSourceCode}:{clientTempPU}", "Counter": nextCounter(), "Client Digital Signature": f"{clientSignature}"})
         sharedSecret, cipherText = await asyncio.to_thread(serverHybridEncryption, clientMsg)
         await sendMessageToServer(f"{sharedSecret}:{cipherText}")
 
@@ -1081,7 +1096,7 @@ class MessagingApp(QMainWindow):
         """Triggered when the dialog calls self.accept() upon successful login"""
         self.authenticate = True
         clientSignature = await asyncio.to_thread(clientDigitalSignature,"Tung Tung Tung Sahur Request COU, FL, and PN", CLIENT_TEMP_PRIVATE_KEY)
-        clientMsg = json.dumps({"Message Code": "#0004", "Client Message": "Tung Tung Tung Sahur Request COU, FL, and PN", "Client Digital Signature": clientSignature})
+        clientMsg = json.dumps({"Message Code": "#0004", "Client Message": "Tung Tung Tung Sahur Request COU, FL, and PN", "Counter": nextCounter(), "Client Digital Signature": clientSignature})
         sharedSecret, cipherText = await asyncio.to_thread(serverHybridEncryption, clientMsg)
         await sendMessageToServer(f"{sharedSecret}:{cipherText}")
 
@@ -1108,7 +1123,7 @@ class MessagingApp(QMainWindow):
         self.unlockGUI(False)
 
         clientSignature = await asyncio.to_thread(clientDigitalSignature, friendUsername, CLIENT_TEMP_PRIVATE_KEY)
-        clientMsg = json.dumps({"Message Code": "#0005", "Client Message": friendUsername, "Client Digital Signature": clientSignature})
+        clientMsg = json.dumps({"Message Code": "#0005", "Client Message": friendUsername, "Counter": nextCounter(), "Client Digital Signature": clientSignature})
         sharedSecret, cipherText = await asyncio.to_thread(serverHybridEncryption, clientMsg)
         await sendMessageToServer(f"{sharedSecret}:{cipherText}")
 
@@ -1243,7 +1258,7 @@ class MessagingApp(QMainWindow):
             text_label.setText(f"<b>{username}</b> {notifType.replace('request_', '')} your friend request!")
             dismiss_btn = QPushButton("Dismiss")
             dismiss_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            dismiss_btn.clicked.connect(lambda checked=False, nt="friend_request", u=username: asyncio.create_task(self.removeNotification(nt, u, True)))
+            dismiss_btn.clicked.connect(lambda checked=False, nt=notifType, u=username: asyncio.create_task(self.removeNotification(nt, u, True)))
 
             btn_layout.addWidget(dismiss_btn)
 
@@ -1263,29 +1278,24 @@ class MessagingApp(QMainWindow):
         self.notifications_list.setItemWidget(notificationItem, row_widget)
         self.currentPendingNotifications[notifType][username] = notificationItem
 
-    async def removeNotification(self, notifType: Literal["friend_request", "request_accepted", "request_rejected", "unread_messages"], username: str, sendToServer: bool) -> None:
+    async def removeNotification(self, notifType: Literal["friend_request", "request_accepted", "request_rejected", "unread_messages"], username: str, sendToServer: bool, friendRequestDecision: str='' ) -> None:
         """
         Description: Remove a read notification from the notifications list.
         :param notifType: Type of notification
         :param username: From who?
         :param sendToServer: Send Notification ACK To server?
+        :param friendRequestDecision: Friend Request Decision (Only Apply for friend_request Notification)
         :return:
         """
-        try:
-            row = self.notifications_list.row(self.currentPendingNotifications["friend_request"][username])
-        except KeyError:
-            try:
-                row = self.notifications_list.row(self.currentPendingNotifications["request_rejected"][username])
-            except KeyError:
-                try:
-                    row = self.notifications_list.row(self.currentPendingNotifications["request_accepted"][username])
-                except KeyError:
-                    row = self.notifications_list.row(self.currentPendingNotifications["unread_messages"][username])
+        row = self.notifications_list.row(self.currentPendingNotifications[notifType][username])
         self.notifications_list.takeItem(row)
         if sendToServer:
-            notificationMessage = json.dumps({"Notification Type": notifType, "From": username})
+            if notifType == "friend_request":
+                notificationMessage = json.dumps({"Notification Type": friendRequestDecision, "From": username})
+            else:
+                notificationMessage = json.dumps({"Notification Type": notifType, "From": username})
             clientSignature = await asyncio.to_thread(clientDigitalSignature, notificationMessage, CLIENT_TEMP_PRIVATE_KEY)
-            clientMsg = json.dumps({"Message Code": "#0010", "Client Message": notificationMessage, "Client Digital Signature": clientSignature})
+            clientMsg = json.dumps({"Message Code": "#0010", "Client Message": notificationMessage, "Counter": nextCounter(), "Client Digital Signature": clientSignature})
             sharedSecret, cipherText = await asyncio.to_thread(serverHybridEncryption, clientMsg)
             await sendMessageToServer(f"{sharedSecret}:{cipherText}")
 
@@ -1308,7 +1318,7 @@ class MessagingApp(QMainWindow):
             decision = "request_rejected"
             if self.currentOnlineUsers.get(username, None) is not None:
                 self.addNewOnlineUserToList(username, "None")
-        await self.removeNotification(decision, username, True)
+        await self.removeNotification("friend_request", username, True, decision)
 
     async def viewUnreadMessages(self, username: str) -> None:
         """
@@ -1421,7 +1431,7 @@ class MessagingApp(QMainWindow):
         label.setText("Pending Friend Invitation")
         button.deleteLater()
         clientSignature = await asyncio.to_thread(clientDigitalSignature, username, CLIENT_TEMP_PRIVATE_KEY)
-        clientMsg = json.dumps({"Message Code": "#0011", "Client Message": username, "Client Digital Signature": clientSignature})
+        clientMsg = json.dumps({"Message Code": "#0011", "Client Message": username, "Counter": nextCounter(), "Client Digital Signature": clientSignature})
         sharedSecret, encryptedMessage = await asyncio.to_thread(serverHybridEncryption, clientMsg)
         await sendMessageToServer(f"{sharedSecret}:{encryptedMessage}")
 
@@ -1458,7 +1468,7 @@ class MessagingApp(QMainWindow):
         keyForRecipient = await asyncio.to_thread(RSAencrypt, aesKey,f"{CURRENT_FRIEND_PUBLIC_KEY}PublicKey.pem")
         finalMessage = json.dumps({"To": recipient, "Date": date, "Message": EncryptedMessage, "Key For Self": keyForSelf, "Key For Recipient": keyForRecipient})
         clientSignature = await asyncio.to_thread(clientDigitalSignature, finalMessage, CLIENT_TEMP_PRIVATE_KEY)
-        finalMessageToServer = json.dumps({"Message Code": "#0006", "Client Message": finalMessage, "Client Digital Signature": clientSignature})
+        finalMessageToServer = json.dumps({"Message Code": "#0006", "Client Message": finalMessage, "Counter": nextCounter(), "Client Digital Signature": clientSignature})
         sharedSecret, cipherText = await asyncio.to_thread(serverHybridEncryption, finalMessageToServer)
         await sendMessageToServer(f"{sharedSecret}:{cipherText}")
         # Lock UI until receive a confirmation from the server that the message was delivered to the recipient successfully!
