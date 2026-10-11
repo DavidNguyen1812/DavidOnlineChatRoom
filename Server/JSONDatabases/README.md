@@ -15,23 +15,28 @@ This directory houses the local JSON databases responsible for persisting user c
 ### 1. `accountData.json` (User Profiles & Authentication)
 
 ```json
-{
     "JohnDoe": {
-        "Password": "5e46af301d8db0b0c581cc083428a16ec0b01acfa82b37c1c3fc30a850e8a22742bbb3133b13d6a82117786e6926b1612ccac9aa745faa327791e02a7bff8fd9",
-        "Last Log In": "Mon Jan 1 00:00:00 1900",
-        "Current Lock Out Time": 1,
-        "Locked Out Record": ["Tue Jan 2 00:00:00 1900"],
+        "Password": {
+            "salt": "EWDQWBMx10HpiptxmzkqJQ==",
+            "hash": "2bf5532d0fe31ea73452b75f1bb2d000f4b7cdcde316b5c11d0948032f5355a0a272c7a3c293e29f28ca79e8e3fcdf5f8b4ef6e62b9032b6d0ede3a11c6002eb",
+            "iterations": 600000
+        },
+        "Last Log In": "Sat Oct 10 22:01:47 2026",
+        "Current Lock Out Time": 0,
+        "Failed Attempts": 0,
+        "Locked Out Record": [],
         "Friends": [
-            "JaneDoe"
+            "DavidNguyen1812",
+            "CodyArthur"
         ]
     }
-}
 
 ```
 
 * **`Password`**: A SHA-512 hash of the user's password, strictly salted with their unique username to neutralize rainbow table attacks and prevent hash collisions.
 * **`Last Log In`**: Timestamp of the most recent successfully authenticated session.
 * **`Current Lock Out Time`**: Active lockout duration metric used to mitigate brute-force authentication attempts.
+* **`Failed Attempts`**: Persistently keeping track of current failed log in attempts.
 * **`Locked Out Record`**: Historical log tracking the timestamps of prior account lockouts.
 * **`Friends`**: An array of authorized peer usernames explicitly approved by the user.
 
