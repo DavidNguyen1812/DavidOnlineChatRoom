@@ -3,7 +3,7 @@ import asyncio
 from qasync import QEventLoop, asyncSlot
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSpacerItem, QSizePolicy, QStyledItemDelegate, QStyle,
-    QSplitter, QLabel, QTextEdit, QLineEdit, QPushButton, QMessageBox, QListWidget, QListWidgetItem, QDialog
+    QSplitter, QLabel, QTextEdit, QLineEdit, QPushButton, QMessageBox, QListWidget, QListWidgetItem, QDialog, QTabWidget
 )
 from PySide6.QtCore import Qt, QSize, QObject, Signal, Slot
 from PySide6.QtGui import QFont, QColor, QCloseEvent, QPainter, QPen, QGuiApplication
@@ -16,7 +16,7 @@ from Crypto.Hash import SHA256
 from Crypto.Signature import pss
 from typing import Any, Tuple, Literal
 
-import time, os, hashlib, base64, re, json, pathlib
+import time, os, hashlib, base64, json, pathlib
 
 
 HEADER = 64 # HEADER value must match the server header value
@@ -26,8 +26,7 @@ ROOT_DIR = pathlib.Path(__file__).parent.parent.absolute()
 SERVER_PUBLIC_KEY = str(ROOT_DIR / "RSAKeys" / "ServerPU" / "ServerRSApublicKey.pem")
 CLIENT_TEMP_PUBLIC_KEY = str(ROOT_DIR / "RSAKeys" / "Ephemeral" / "ClientRSApublicKey.pem")
 CLIENT_TEMP_PRIVATE_KEY = str(ROOT_DIR / "RSAKeys" / "Ephemeral" / "ClientRSAprivateKey.pem")
-CLIENT_PERMANENT_PUBLIC_KEY = str(ROOT_DIR / "RSAKeys" / "Permanent" / "ClientRSApublicKey.pem")
-CLIENT_PERMANENT_PRIVATE_KEY =str(ROOT_DIR / "RSAKeys" / "Permanent" / "ClientRSAprivateKey.pem")
+CLIENT_PERMANENT_KEY_FOLDER = str(ROOT_DIR / "RSAKeys" / "Permanent")
 CLIENT_SOURCE_CODE = pathlib.Path(__file__).absolute()
 CURRENT_FRIEND_PUBLIC_KEY = f"{ROOT_DIR / "RSAKeys" / "CurrentFriendPU"}/"
 
@@ -36,7 +35,6 @@ SERVERPUBLICKEYHASH = "3d33af6e392df3dd32584e5a74549790ec0ded67fc7dd95ce56ba7a8c
 
 STATUS = "FIRST CONNECTION"
 USERNAME = ''
-PASSWORDCHECK = False
 
 client_reader = None
 client_writer = None
@@ -62,22 +60,6 @@ with open(CLIENT_TEMP_PRIVATE_KEY, "wb") as pemfile:
 with open(CLIENT_TEMP_PUBLIC_KEY, "wb") as pemfile:
     pemfile.write(publicKey)
 print("New Ephemeral RSA keys have been generated")
-
-if not os.path.exists(CLIENT_PERMANENT_PRIVATE_KEY) or not os.path.exists(CLIENT_PERMANENT_PUBLIC_KEY):
-    print(
-        "-------------------------------\nCRITICAL MESSAGE\n-------------------------------\nOne or two of your permanent RSA keys is missing. If you already have an account registered with the server, you won't be able to authenticate with that account anymore!\nIf you do not have any account registered with the server yet, you can safely ignore this message!")
-    print("\n\nGenerating New Permanent RSA keys...")
-    key = RSA.generate(4096)
-    privateKey = key.export_key()
-    publicKey = key.publickey().export_key()
-    with open(CLIENT_PERMANENT_PRIVATE_KEY, "wb") as pemfile:
-        pemfile.write(privateKey)
-    with open(CLIENT_PERMANENT_PUBLIC_KEY, "wb") as pemfile:
-        pemfile.write(publicKey)
-    print("New Permanent RSA keys have been generated")
-    print(
-        "-------------------------------\nCRITICAL MESSAGE\n-------------------------------\nDO NOT SHARE YOUR PERMANENT PRIVATE KEY TO PUBLIC!\nAFTER YOU HAVE REGISTERED AN ACCOUNT WITH THE SERVER, DO NOT LOSE YOUR PERMANENT RSA KEYS, YOUR ACCOUNT ENCRYPTED CHAT HISTORY ARE TIED TO THOSE KEYS! LOSE IT MEAN YOU WILL LOSE ALL YOUR DATA!")
-
 
 async def sendMessageToServer(message: str) -> None:
     """
@@ -203,7 +185,7 @@ def RSAdecrypt(cipherText: str, key: str) -> Tuple[bool, str]:
     try:
         # Decode the Base64 strings back to raw bytes
         cipherText = base64.b64decode(cipherText)
-        # Decryptiong
+        # Decryption
         private_key = RSA.import_key(open(key).read())
         cipherRSA = PKCS1_OAEP.new(private_key)
         return True, cipherRSA.decrypt(cipherText).decode('utf-8')
@@ -257,6 +239,7 @@ class ThreadSignals(QObject):
     server_connection_error = Signal()
     bad_request = Signal()
     invalid_request = Signal()
+    rate_limit = Signal()
     server_pu_verification_failure = Signal()
     sending_source_code_and_temp_pu = Signal()
     server_ds_verification_failure = Signal()
@@ -265,9 +248,12 @@ class ThreadSignals(QObject):
     server_decryption_failure = Signal()
     client_decryption_failure = Signal()
     launch_authentication_window = Signal()
-    show_server_message_in_authentication_form = Signal(str, bool)
-    disable_authentication_form_input = Signal(bool)
-    confirm_account_registration = Signal()
+    show_server_message_in_login_form = Signal(str, bool)
+    disable_login_form_input = Signal(bool)
+    show_server_message_in_registration_form = Signal(str, bool)
+    disable_registration_form_input = Signal(bool)
+    show_server_message_in_reset_form = Signal(str, bool)
+    disable_reset_form_input = Signal(bool)
     authentication_success = Signal(bool)
     update_current_online_user_list = Signal(str, str)
     update_current_friend_list = Signal(dict)
@@ -326,6 +312,8 @@ async def receiveMessage() -> None:
                             signals.bad_request.emit()
                         elif serverMsg.get("Status Code", 0) == 401:
                             signals.invalid_request.emit()
+                        elif serverMsg.get("Status Code", 0) == 429:
+                            signals.rate_limit.emit()
                         elif serverMsg.get("Status Code", 0) == 500:
                             signals.server_decryption_failure.emit()
                         elif serverMsg.get("Status Code", 0) == 501:
@@ -350,36 +338,63 @@ async def receiveMessage() -> None:
                                         updateSourceCode = base64.b64decode(serverMsg.get("Server Message", '').split(":")[0])
                                         hashSourceCode = serverMsg.get("Server Message", '').split(":")[1]
                                         signals.client_code_update.emit(updateSourceCode, hashSourceCode)
+
                                 elif serverMsg.get("Message Code", '') == "#0002":
                                     statusCode = serverMsg.get("Status Code", 0)
-                                    serverMessage = serverMsg.get("Server Message", "")
-                                    if statusCode == 200:
-                                        authChallenge = serverMsg.get("Auth Challenge", "")
-                                        with open(CLIENT_PERMANENT_PUBLIC_KEY, 'rb') as clientPU:
-                                            clientPermPU = clientPU.read()
-                                        hashedClientPermPU = hashlib.sha512(clientPermPU).hexdigest()
-                                        permSignature = await asyncio.to_thread(clientDigitalSignature, f"{hashedClientPermPU}:{authChallenge}", CLIENT_PERMANENT_PRIVATE_KEY)
-                                        clientSignature = await asyncio.to_thread(clientDigitalSignature, f"{hashedClientPermPU}:{authChallenge}:{permSignature}:Confirm Login", CLIENT_TEMP_PRIVATE_KEY)
-                                        clientMsg = json.dumps({"Message Code": "#0003", "Client Message": f"{hashedClientPermPU}:{authChallenge}:{permSignature}:Confirm Login", "Counter": nextCounter(), "Client Digital Signature": f"{clientSignature}"})
-                                        sharedSecret, cipherText = await asyncio.to_thread(serverHybridEncryption,clientMsg)
-                                        await sendMessageToServer(f"{sharedSecret}:{cipherText}")
-                                    elif statusCode == 401 or statusCode == 403:
-                                        signals.disable_authentication_form_input.emit(True)
-                                        if not serverMessage.startswith("There is no registered account with user name"):
-                                            signals.show_server_message_in_authentication_form.emit(serverMessage, True)
-                                            if statusCode == 403 or serverMessage.startswith("Too Many Invalid Log In Attempt!"):
-                                                await asyncio.sleep(5)
-                                                signals.authentication_success.emit(False)
-                                            await asyncio.sleep(2)
-                                            signals.disable_authentication_form_input.emit(False)
+                                    authType = serverMsg.get("Auth Type", "")
+                                    serverMessage = serverMsg.get('Server Message', '')
+                                    if authType in ["Log In", "Account Registration", "Reset Password"]:
+                                        showServerMsgSignal = signals.show_server_message_in_login_form if authType == "Log In" else signals.show_server_message_in_registration_form if authType == "Account Registration" else signals.show_server_message_in_reset_form
+                                        disableFormInputSignal = signals.disable_login_form_input if authType == "Log In" else signals.disable_registration_form_input if authType == "Account Registration" else signals.disable_reset_form_input
+                                        if statusCode == 200:
+                                            if "Your account official permanent RSA key pairs!" in serverMessage:
+                                                if len(serverMessage.split(":")) == 3:
+                                                    serverAssignedPI, serverAssignedPU, _ = serverMessage.split(":")
+                                                    with open(f"{CLIENT_PERMANENT_KEY_FOLDER}/ClientRSAprivateKey.pem", 'wb') as clientPI:
+                                                        clientPI.write(base64.b64decode(serverAssignedPI))
+                                                    with open(f"{CLIENT_PERMANENT_KEY_FOLDER}/ClientRSApublicKey.pem", 'wb') as clientPU:
+                                                        clientPU.write(base64.b64decode(serverAssignedPU))
+                                                showServerMsgSignal.emit(f"The server sent you the assigned RSA keys!\nIt can be locate at RSAKeys/Permanent/ from your Client folder\nThese keys are linked to your account data!\nThe private key is never store on the server!\nIf you loose the key, you will lose access to your account forever!", False)
+                                            else:
+                                                showServerMsgSignal.emit(serverMessage, False)
+                                                if authType == "Log In":
+                                                    if serverMessage.startswith("If an account with"):
+                                                        showServerMsgSignal.emit("Confirm Code", False)
+                                                        disableFormInputSignal.emit(False)
+                                                    if serverMessage == "Server is verifying your account public key!":
+                                                        authChallenge = serverMsg.get("Auth Challenge", "")
+                                                        with open(f"{CLIENT_PERMANENT_KEY_FOLDER}/ClientRSApublicKey.pem", 'rb') as clientPU:
+                                                            clientPermPU = clientPU.read()
+                                                        hashedClientPermPU = hashlib.sha512(clientPermPU).hexdigest()
+                                                        permSignature = await asyncio.to_thread(clientDigitalSignature, f"{hashedClientPermPU}:{authChallenge}", f"{CLIENT_PERMANENT_KEY_FOLDER}/ClientRSAprivateKey.pem")
+                                                        clientSignature = await asyncio.to_thread(clientDigitalSignature, f"{hashedClientPermPU}:{authChallenge}:{permSignature}::Log In", CLIENT_TEMP_PRIVATE_KEY)
+                                                        clientMsg = json.dumps({"Message Code": "#0003", "Client Message": f"{hashedClientPermPU}:{authChallenge}:{permSignature}::Log In", "Counter": nextCounter(), "Client Digital Signature": f"{clientSignature}"})
+                                                        sharedSecret, cipherText = await asyncio.to_thread(serverHybridEncryption,clientMsg)
+                                                        await sendMessageToServer(f"{sharedSecret}:{cipherText}")
+                                                else:
+                                                    disableFormInputSignal.emit(False)
                                         else:
-                                            signals.confirm_account_registration.emit()
+                                            showServerMsgSignal.emit(serverMessage, True)
+                                            if statusCode == 403:
+                                                await asyncio.sleep(4)
+                                                signals.authentication_success.emit(False)
+                                            else:
+                                                await asyncio.sleep(2)
+                                                disableFormInputSignal.emit(False)
+
                                 elif serverMsg.get("Message Code", '') == "#0003":
+                                    authType = serverMsg.get("Auth Type", '')
                                     statusCode = serverMsg.get("Status Code", 0)
-                                    signals.disable_authentication_form_input.emit(True)
-                                    signals.show_server_message_in_authentication_form.emit(serverMsg.get("Server Message", ''), statusCode == 403)
-                                    await asyncio.sleep(1)
+                                    showServerMsgSignal = signals.show_server_message_in_login_form if authType == "Log In" else signals.show_server_message_in_registration_form
+                                    disableFormInputSignal = signals.disable_login_form_input if authType == "Log In" else signals.disable_registration_form_input
+                                    showServerMsgSignal.emit(serverMsg.get("Server Message", ''), statusCode == 403)
+                                    disableFormInputSignal.emit(statusCode != 403)
+                                    if statusCode == 403:
+                                        await asyncio.sleep(5)
+                                    else:
+                                        await asyncio.sleep(1)
                                     signals.authentication_success.emit(statusCode == 200)
+
                                 elif serverMsg.get("Message Code", '') == "#0004":
                                     try:
                                         bigBoyData = json.loads(serverMsg.get("Server Message", ""))
@@ -457,48 +472,151 @@ async def receiveMessage() -> None:
     except OSError:
         return
 
+def applyColoringTheme(self, scheme: Qt.ColorScheme):
+    if scheme == Qt.ColorScheme.Dark:
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #121212;
+            }
+            QLabel#titleLabel {
+                font-size: 30px;
+                font-weight: bold;
+                color: #ffffff;
+                margin-bottom: 20px;
+            }
+            QLabel {
+                font-size: 13px;
+                font-weight: bold;
+                color: #e0e0e0;
+            }
+            QLabel#serverMessageLabel {
+                font-size: 12px;
+                font-weight: bold;
+                font-style: italic;
+                color: #ff6b6b; /* Lighter red to stand out against dark background */
+                margin-top: 5px;
+            }
+            QLineEdit {
+                padding: 10px;
+                font-size: 14px;
+                border: 1px solid #444444;
+                border-radius: 6px;
+                background-color: #1e1e1e;
+                color: #ffffff;
+            }
+            QLineEdit:focus { 
+                border: 2px solid #3498db; 
+            }
+            QPushButton {
+                background-color: #2980b9;
+                color: white;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 12px;
+                border-radius: 6px;
+                margin-top: 10px;
+            }
+            QPushButton:hover { 
+                background-color: #3498db; 
+            }
+            QPushButton:pressed { 
+                background-color: #1f618d; 
+            }
+        """)
+    else:
+        self.setStyleSheet("""
+            QDialog {background-color: #f7f9fc;}
+            QLabel#titleLabel {
+                font-size: 30px;
+                font-weight: bold;
+                color: #2c3e50;
+                margin-bottom: 20px;
+            }
+            QLabel {
+                font-size: 13px;
+                font-weight: bold;
+                color: #34495e;
+            }
+            QLabel#serverMessageLabel {
+                font-size: 12px;
+                font-weight: bold;
+                font-style: italic;
+                color: #e74c3c;
+                margin-top: 5px;
+            }
+            QLineEdit {
+                padding: 10px;
+                font-size: 14px;
+                border: 1px solid #bdc3c7;
+                border-radius: 6px;
+                background-color: #ffffff;
+                color: #2c3e50;
+            }
+            QLineEdit:focus { border: 2px solid #3498db; }
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 12px;
+                border-radius: 6px;
+                margin-top: 10px;
+            }
+            QPushButton:hover { background-color: #2980b9; }
+            QPushButton:pressed { background-color: #1f618d; }
+        """)
 
-class AuthenticationForm(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)  # This guarantees the C++ object is destroyed when closed
-        self.setWindowTitle("Authentication Form")
-        self.setFixedSize(400, 500)
+class LoginTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.code_confirmation_state = False
         # Apply initial theme on startup
-        self.applyColoringTheme(QGuiApplication.styleHints().colorScheme())
+        applyColoringTheme(self, QGuiApplication.styleHints().colorScheme())
         # Listen for OS theme changes
-        QGuiApplication.styleHints().colorSchemeChanged.connect(self.applyColoringTheme)
-        signals.show_server_message_in_authentication_form.connect(self.showInfoMessage)
-        signals.disable_authentication_form_input.connect(self.lockedFormInput)
-        signals.confirm_account_registration.connect(self.confirmAccountRegistration)
-        signals.authentication_success.connect(self.finishAuthentication)
+        QGuiApplication.styleHints().colorSchemeChanged.connect(lambda colorScheme, myself=self: applyColoringTheme(myself, colorScheme))
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(40, 40, 40, 40)
         main_layout.setSpacing(15)
 
-        title_label = QLabel("Welcome To The Secure Messaging App")
+        title_label = QLabel("Log In")
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title_label.setObjectName("titleLabel")  # Set object name for specific CSS targeting
 
-        username_label = QLabel("Username")
+        self.username_label = QLabel("Username")
         self.username_input = QLineEdit()
         self.username_input.setMaxLength(40)
-        self.username_input.setPlaceholderText("Enter your username")
+        self.username_input.setPlaceholderText("Enter your username or gmail")
 
-        password_label = QLabel("Password")
+        self.password_label = QLabel("Password")
         self.password_input = QLineEdit()
         self.password_input.setPlaceholderText("Enter your password")
         self.password_input.setMaxLength(40)
         # Mask the password input with dots
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
 
-        self.submit_button = QPushButton("Log In/Register")
+        self.confirm_code_label = QLabel("Log In Confirm Code")
+        self.confirm_code_input = QLineEdit()
+        self.confirm_code_input.setMaxLength(40)
+        self.confirm_code_input.setPlaceholderText("Enter a valid confirmation code")
+        self.confirm_code_label.hide()
+        self.confirm_code_input.hide()
+
+        self.password_label = QLabel("Password")
+        self.password_input = QLineEdit()
+        self.password_input.setPlaceholderText("Enter your password")
+        self.password_input.setMaxLength(40)
+        # Mask the password input with dots
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+
+        self.submit_button = QPushButton("Submit")
         self.submit_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.submit_button.setAutoDefault(True)  # Click upon Enter key is pressed
         self.submit_button.clicked.connect(self.sendingFormInput)
 
         self.username_input.returnPressed.connect(self.submit_button.click)
         self.password_input.returnPressed.connect(self.submit_button.click)
+        self.confirm_code_input.returnPressed.connect(self.submit_button.click)
 
         self.server_message_label = QLabel("")
         self.server_message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -508,113 +626,29 @@ class AuthenticationForm(QDialog):
         main_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
 
         main_layout.addWidget(title_label)
-        main_layout.addWidget(username_label)
+        main_layout.addWidget(self.username_label)
         main_layout.addWidget(self.username_input)
-        main_layout.addWidget(password_label)
+        main_layout.addWidget(self.password_label)
         main_layout.addWidget(self.password_input)
+        main_layout.addWidget(self.confirm_code_label)
+        main_layout.addWidget(self.confirm_code_input)
         main_layout.addWidget(self.submit_button)
         main_layout.addWidget(self.server_message_label)
 
         main_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
 
-    def applyColoringTheme(self, scheme: Qt.ColorScheme):
-        if scheme == Qt.ColorScheme.Dark:
-            self.setStyleSheet("""
-                QDialog {
-                    background-color: #121212;
-                }
-                QLabel#titleLabel {
-                    font-size: 14px;
-                    font-weight: bold;
-                    color: #ffffff;
-                    margin-bottom: 20px;
-                }
-                QLabel {
-                    font-size: 13px;
-                    font-weight: bold;
-                    color: #e0e0e0;
-                }
-                QLabel#serverMessageLabel {
-                    font-size: 12px;
-                    font-weight: bold;
-                    font-style: italic;
-                    color: #ff6b6b; /* Lighter red to stand out against dark background */
-                    margin-top: 5px;
-                }
-                QLineEdit {
-                    padding: 10px;
-                    font-size: 14px;
-                    border: 1px solid #444444;
-                    border-radius: 6px;
-                    background-color: #1e1e1e;
-                    color: #ffffff;
-                }
-                QLineEdit:focus { 
-                    border: 2px solid #3498db; 
-                }
-                QPushButton {
-                    background-color: #2980b9;
-                    color: white;
-                    font-size: 14px;
-                    font-weight: bold;
-                    padding: 12px;
-                    border-radius: 6px;
-                    margin-top: 10px;
-                }
-                QPushButton:hover { 
-                    background-color: #3498db; 
-                }
-                QPushButton:pressed { 
-                    background-color: #1f618d; 
-                }
-            """)
-        else:
-            self.setStyleSheet("""
-                QDialog {background-color: #f7f9fc;}
-                QLabel#titleLabel {
-                    font-size: 14px;
-                    font-weight: bold;
-                    color: #2c3e50;
-                    margin-bottom: 20px;
-                }
-                QLabel {
-                    font-size: 13px;
-                    font-weight: bold;
-                    color: #34495e;
-                }
-                QLabel#serverMessageLabel {
-                    font-size: 12px;
-                    font-weight: bold;
-                    font-style: italic;
-                    color: #e74c3c;
-                    margin-top: 5px;
-                }
-                QLineEdit {
-                    padding: 10px;
-                    font-size: 14px;
-                    border: 1px solid #bdc3c7;
-                    border-radius: 6px;
-                    background-color: #ffffff;
-                    color: #2c3e50;
-                }
-                QLineEdit:focus { border: 2px solid #3498db; }
-                QPushButton {
-                    background-color: #3498db;
-                    color: white;
-                    font-size: 14px;
-                    font-weight: bold;
-                    padding: 12px;
-                    border-radius: 6px;
-                    margin-top: 10px;
-                }
-                QPushButton:hover { background-color: #2980b9; }
-                QPushButton:pressed { background-color: #1f618d; }
-            """)
+        signals.show_server_message_in_login_form.connect(self.showInfoMessage)
+        signals.disable_login_form_input.connect(self.lockedFormInput)
 
     @Slot(bool)
     def lockedFormInput(self, locked):
-        self.username_input.setDisabled(locked)
-        self.password_input.setDisabled(locked)
+        if not self.code_confirmation_state:
+            self.username_input.setDisabled(locked)
+            self.password_input.setDisabled(locked)
+        else:
+            self.username_input.setDisabled(True)
+            self.password_input.setDisabled(True)
+            self.confirm_code_input.setDisabled(locked)
         self.submit_button.setDisabled(locked)
 
     @asyncSlot()
@@ -622,20 +656,171 @@ class AuthenticationForm(QDialog):
         if not self.submit_button.isEnabled():
             return
         self.lockedFormInput(True)
-        if self.username_input.text() and self.password_input.text():
-            username = self.username_input.text()
-            password = self.password_input.text()
-            if len(password) < 12 or None in [re.search(r'[a-z]', password), re.search(r'[A-Z]', password), re.search(r'\d', password), re.search(r'[!@#$%&*_+=]', password)]:
-                self.showInfoMessage("Password must at least 12 characters!\nHave mixed case ASCII letters and numbers!\nHave any of the following special characters below:\n@#$%&*_+=")
-                self.lockedFormInput(False)
-            else:
-                clientSignature = await asyncio.to_thread(clientDigitalSignature, f"{username}:{password}", CLIENT_TEMP_PRIVATE_KEY)
-                clientMsg = json.dumps({"Message Code": "#0002", "Client Message": f"{username}:{password}", "Counter": nextCounter(), "Client Digital Signature": f"{clientSignature}"})
+        username = self.username_input.text()
+        password = self.password_input.text()
+        if not self.code_confirmation_state:
+            if username and password:
+                clientSignature = await asyncio.to_thread(clientDigitalSignature, f"{username}:{password}:::Log In", CLIENT_TEMP_PRIVATE_KEY)
+                clientMsg = json.dumps({"Message Code": "#0002", "Client Message": f"{username}:{password}:::Log In", "Counter": nextCounter(), "Client Digital Signature": f"{clientSignature}"})
                 sharedSecret, cipherText = await asyncio.to_thread(serverHybridEncryption, clientMsg)
                 await sendMessageToServer(f"{sharedSecret}:{cipherText}")
+            else:
+                self.showInfoMessage("Input fields can not be empty!")
+                self.lockedFormInput(False)
         else:
-            self.showInfoMessage("Username and Password field can not be empty!")
-            self.lockedFormInput(False)
+            if self.confirm_code_input.text():
+                clientSignature = await asyncio.to_thread(clientDigitalSignature, f"{username}:{password}::{self.confirm_code_input.text()}:Log In", CLIENT_TEMP_PRIVATE_KEY)
+                clientMsg = json.dumps({"Message Code": "#0002", "Client Message": f"{username}:{password}::{self.confirm_code_input.text()}:Log In", "Counter": nextCounter(), "Client Digital Signature": f"{clientSignature}"})
+                sharedSecret, cipherText = await asyncio.to_thread(serverHybridEncryption, clientMsg)
+                await sendMessageToServer(f"{sharedSecret}:{cipherText}")
+            else:
+                self.showInfoMessage("Input fields can not be empty!")
+                self.lockedFormInput(False)
+
+    @Slot(str, bool)
+    def showInfoMessage(self, message: str, is_error: bool = True):
+        if message == "Confirm Code" and "Please try again later." not in message:
+            self.code_confirmation_state = True
+            self.username_label.hide()
+            self.username_input.hide()
+            self.password_label.hide()
+            self.password_input.hide()
+            self.confirm_code_label.show()
+            self.confirm_code_input.show()
+        else:
+            self.server_message_label.setText(message)
+            if not is_error:
+                self.server_message_label.setStyleSheet("color: #27ae60;")
+            else:
+                self.server_message_label.setStyleSheet("")
+            self.server_message_label.show()
+
+
+class RegisterTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.code_confirmation_state = False
+        self.confirm_registration = False
+        # Apply initial theme on startup
+        applyColoringTheme(self, QGuiApplication.styleHints().colorScheme())
+        # Listen for OS theme changes
+        QGuiApplication.styleHints().colorSchemeChanged.connect(lambda colorScheme, myself=self: applyColoringTheme(myself, colorScheme))
+        signals.show_server_message_in_registration_form.connect(self.showInfoMessage)
+        signals.disable_registration_form_input.connect(self.lockedFormInput)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(40, 40, 40, 40)
+        main_layout.setSpacing(15)
+
+        title_label = QLabel("Register An Account")
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_label.setObjectName("titleLabel")  # Set object name for specific CSS targeting
+
+        self.email_label = QLabel("Email")
+        self.email_input = QLineEdit()
+        self.email_input.setMaxLength(40)
+        self.email_input.setPlaceholderText("Enter an email address")
+
+        self.username_label = QLabel("Username")
+        self.username_input = QLineEdit()
+        self.username_input.setMaxLength(40)
+        self.username_input.setPlaceholderText("Enter a username")
+
+        self.password_label = QLabel("Password")
+        self.password_input = QLineEdit()
+        self.password_input.setPlaceholderText("Enter a password")
+        self.password_input.setMaxLength(40)
+        # Mask the password input with dots
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+
+        self.confirm_code_label = QLabel("Account Registration Confirm Code")
+        self.confirm_code_input = QLineEdit()
+        self.confirm_code_input.setPlaceholderText("Enter a valid confirmation code")
+        self.confirm_code_input.setMaxLength(40)
+        self.confirm_code_label.hide()
+        self.confirm_code_input.hide()
+
+        self.submit_button = QPushButton("Submit")
+        self.submit_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.submit_button.setAutoDefault(True) # Click upon Enter key is pressed
+        self.submit_button.clicked.connect(self.sendingFormInput)
+
+        self.email_input.returnPressed.connect(self.submit_button.click)
+        self.username_input.returnPressed.connect(self.submit_button.click)
+        self.password_input.returnPressed.connect(self.submit_button.click)
+        self.confirm_code_input.returnPressed.connect(self.submit_button.click)
+
+        self.server_message_label = QLabel("")
+        self.server_message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.server_message_label.setObjectName("serverMessageLabel")
+        self.server_message_label.hide()  # Hidden by default
+
+        main_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+
+        main_layout.addWidget(title_label)
+        main_layout.addWidget(self.email_label)
+        main_layout.addWidget(self.email_input)
+        main_layout.addWidget(self.username_label)
+        main_layout.addWidget(self.username_input)
+        main_layout.addWidget(self.password_label)
+        main_layout.addWidget(self.password_input)
+        main_layout.addWidget(self.confirm_code_label)
+        main_layout.addWidget(self.confirm_code_input)
+        main_layout.addWidget(self.submit_button)
+        main_layout.addWidget(self.server_message_label)
+
+        main_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+
+    @Slot(bool)
+    def lockedFormInput(self, locked):
+        if not self.confirm_registration:
+            if not self.confirm_registration:
+                if not self.code_confirmation_state:
+                    self.email_input.setDisabled(locked)
+                    self.username_input.setDisabled(locked)
+                    self.password_input.setDisabled(locked)
+                else:
+                    self.email_input.setDisabled(True)
+                    self.username_input.setDisabled(True)
+                    self.password_input.setDisabled(True)
+                    self.confirm_code_input.setDisabled(locked)
+        self.submit_button.setDisabled(locked)
+
+    @asyncSlot()
+    async def sendingFormInput(self):
+        if not self.submit_button.isEnabled():
+            return
+        self.lockedFormInput(True)
+        username = self.username_input.text()
+        password = self.password_input.text()
+        email = self.email_input.text()
+        if not self.confirm_registration:
+            if not self.code_confirmation_state:
+                if username and password and email:
+                    clientSignature = await asyncio.to_thread(clientDigitalSignature, f"{username}:{email}:{password}::Account Registration", CLIENT_TEMP_PRIVATE_KEY)
+                    clientMsg = json.dumps({"Message Code": "#0002", "Client Message": f"{username}:{email}:{password}::Account Registration", "Counter": nextCounter(), "Client Digital Signature": f"{clientSignature}"})
+                    sharedSecret, cipherText = await asyncio.to_thread(serverHybridEncryption, clientMsg)
+                    await sendMessageToServer(f"{sharedSecret}:{cipherText}")
+                else:
+                    self.showInfoMessage("Input fields can not be empty!")
+                    self.lockedFormInput(False)
+            else:
+                if self.confirm_code_input.text():
+                    clientSignature = await asyncio.to_thread(clientDigitalSignature, f"{username}:{email}:{password}:{self.confirm_code_input.text()}:Account Registration", CLIENT_TEMP_PRIVATE_KEY)
+                    clientMsg = json.dumps({"Message Code": "#0002", "Client Message": f"{username}:{email}:{password}:{self.confirm_code_input.text()}:Account Registration", "Counter": nextCounter(), "Client Digital Signature": f"{clientSignature}"})
+                    sharedSecret, cipherText = await asyncio.to_thread(serverHybridEncryption, clientMsg)
+                    await sendMessageToServer(f"{sharedSecret}:{cipherText}")
+                else:
+                    self.showInfoMessage("Input fields can not be empty!")
+                    self.lockedFormInput(False)
+        else:
+            with open(f"{CLIENT_PERMANENT_KEY_FOLDER}/ClientRSApublicKey.pem", 'rb') as clientPU:
+                clientPermPU = clientPU.read()
+            clientPermPU = base64.b64encode(clientPermPU).decode('ascii')
+            clientSignature = await asyncio.to_thread(clientDigitalSignature, f"{username}:{email}:{password}:{clientPermPU}:Account Registration", CLIENT_TEMP_PRIVATE_KEY)
+            clientMsg = json.dumps({"Message Code": "#0003", "Client Message": f"{username}:{email}:{password}:{clientPermPU}:Account Registration", "Counter": nextCounter(), "Client Digital Signature": f"{clientSignature}"})
+            sharedSecret, cipherText = await asyncio.to_thread(serverHybridEncryption, clientMsg)
+            await sendMessageToServer(f"{sharedSecret}:{cipherText}")
 
     @Slot(str, bool)
     def showInfoMessage(self, message: str, is_error: bool = True):
@@ -645,42 +830,206 @@ class AuthenticationForm(QDialog):
         else:
             self.server_message_label.setStyleSheet("")
         self.server_message_label.show()
+        if not self.code_confirmation_state:
+            if not is_error:
+                self.code_confirmation_state = True
+                self.email_label.hide()
+                self.email_input.hide()
+                self.username_label.hide()
+                self.username_input.hide()
+                self.password_label.hide()
+                self.password_input.hide()
+                self.confirm_code_label.show()
+                self.confirm_code_input.show()
+        if "Please try again later." in message:
+            self.code_confirmation_state = True
+            self.email_label.show()
+            self.email_input.show()
+            self.username_label.show()
+            self.username_input.show()
+            self.password_label.show()
+            self.password_input.show()
+            self.confirm_code_label.hide()
+            self.confirm_code_input.hide()
+        if "The server sent you the assigned RSA keys!" in message:
+            if not self.confirm_registration:
+                self.confirm_registration = True
+                self.email_label.hide()
+                self.email_input.hide()
+                self.username_label.hide()
+                self.username_input.hide()
+                self.password_label.hide()
+                self.password_input.hide()
+                self.confirm_code_label.hide()
+                self.confirm_code_input.hide()
+                self.submit_button.setText("I Acknowledge The Info")
+                self.submit_button.setEnabled(True)
 
-    @Slot()
-    def confirmAccountRegistration(self):
-        username = self.username_input.text()
-        reg_box = QMessageBox(self)
-        reg_box.setWindowTitle("Account Registration Request")
-        reg_box.setText(f"There is no registered account with user name [{username}] yet! Do you want to register the account with the credential provided?")
-        reg_box.setIcon(QMessageBox.Icon.Information)
-        reg_box.setStandardButtons(QMessageBox.StandardButton.No | QMessageBox.StandardButton.Yes)
-        reg_box.setDefaultButton(QMessageBox.StandardButton.No)
-        reg_box.finished.connect(self.handleRegistrationDecision)
-        reg_box.open()
 
-    @Slot(int)
-    def handleRegistrationDecision(self, result):
-        if result == QMessageBox.StandardButton.No.value or result == QMessageBox.StandardButton.No:
-            error_box = QMessageBox(self)
-            error_box.setWindowTitle("Must Have A Registered Account")
-            error_box.setText("You must have a registered account in order to continue using the application!")
-            error_box.setIcon(QMessageBox.Icon.Critical)
-            error_box.setStandardButtons(QMessageBox.StandardButton.Ok)
-            error_box.finished.connect(lambda _: self.reject())
-            error_box.open()
+class ResetPasswordTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.code_confirmation_state = False
+        # Apply initial theme on startup
+        applyColoringTheme(self, QGuiApplication.styleHints().colorScheme())
+        # Listen for OS theme changes
+        QGuiApplication.styleHints().colorSchemeChanged.connect(lambda colorScheme, myself=self: applyColoringTheme(myself, colorScheme))
+        signals.show_server_message_in_reset_form.connect(self.showInfoMessage)
+        signals.disable_reset_form_input.connect(self.lockedFormInput)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(40, 40, 40, 40)
+        main_layout.setSpacing(15)
+
+        title_label = QLabel("Reset Password")
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_label.setObjectName("titleLabel")  # Set object name for specific CSS targeting
+
+        self.account_id_label = QLabel("Account ID")
+        self.account_id_input = QLineEdit()
+        self.account_id_input.setMaxLength(40)
+        self.account_id_input.setPlaceholderText("Enter a username or email address")
+
+        self.new_password_label = QLabel("New Password")
+        self.new_password_input = QLineEdit()
+        self.new_password_input.setPlaceholderText("Enter a new password")
+        self.new_password_input.setMaxLength(40)
+        # Mask the password input with dots
+        self.new_password_input.setEchoMode(QLineEdit.EchoMode.Password)
+
+        self.confirm_new_password_input = QLineEdit()
+        self.confirm_new_password_input.setPlaceholderText("Confirm your new password")
+        self.confirm_new_password_input.setMaxLength(40)
+        # Mask the password input with dots
+        self.confirm_new_password_input.setEchoMode(QLineEdit.EchoMode.Password)
+
+        self.confirm_code_label = QLabel("Reset Password Confirm Code")
+        self.confirm_code_input = QLineEdit()
+        self.confirm_code_input.setPlaceholderText("Enter a valid confirmation code")
+        self.confirm_code_input.setMaxLength(40)
+        self.confirm_code_label.hide()
+        self.confirm_code_input.hide()
+
+        self.submit_button = QPushButton("Submit")
+        self.submit_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.submit_button.setAutoDefault(True)  # Click upon Enter key is pressed
+        self.submit_button.clicked.connect(self.sendingFormInput)
+
+        self.account_id_input.returnPressed.connect(self.submit_button.click)
+        self.new_password_input.returnPressed.connect(self.submit_button.click)
+        self.confirm_new_password_input.returnPressed.connect(self.submit_button.click)
+        self.confirm_code_input.returnPressed.connect(self.submit_button.click)
+
+        self.server_message_label = QLabel("")
+        self.server_message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.server_message_label.setObjectName("serverMessageLabel")
+        self.server_message_label.hide()  # Hidden by default
+
+        main_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+
+        main_layout.addWidget(title_label)
+        main_layout.addWidget(self.account_id_label)
+        main_layout.addWidget(self.account_id_input)
+        main_layout.addWidget(self.new_password_label)
+        main_layout.addWidget(self.new_password_input)
+        main_layout.addWidget(self.confirm_new_password_input)
+        main_layout.addWidget(self.confirm_code_label)
+        main_layout.addWidget(self.confirm_code_input)
+        main_layout.addWidget(self.submit_button)
+        main_layout.addWidget(self.server_message_label)
+
+        main_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+
+    @Slot(bool)
+    def lockedFormInput(self, locked):
+        if not self.code_confirmation_state:
+            self.account_id_input.setDisabled(locked)
+            self.new_password_input.setDisabled(locked)
+            self.confirm_new_password_input.setDisabled(locked)
         else:
-            asyncio.create_task(self.sendRegistrationPayload())
+            self.account_id_input.setDisabled(True)
+            self.new_password_input.setDisabled(True)
+            self.confirm_new_password_input.setDisabled(True)
+            self.confirm_code_input.setDisabled(locked)
+        self.submit_button.setDisabled(locked)
 
-    async def sendRegistrationPayload(self):
-        username = self.username_input.text()
-        password = self.password_input.text()
-        with open(CLIENT_PERMANENT_PUBLIC_KEY, 'rb') as clientPU:
-            clientPermPU = clientPU.read()
-        clientPermPU = base64.b64encode(clientPermPU).decode('ascii')
-        clientSignature = await asyncio.to_thread(clientDigitalSignature, f"{username}:{password}:{clientPermPU}:Register", CLIENT_TEMP_PRIVATE_KEY)
-        clientMsg = json.dumps({"Message Code": "#0003", "Client Message": f"{username}:{password}:{clientPermPU}:Register", "Counter": nextCounter(), "Client Digital Signature": f"{clientSignature}"})
-        sharedSecret, cipherText = await asyncio.to_thread(serverHybridEncryption, clientMsg)
-        await sendMessageToServer(f"{sharedSecret}:{cipherText}")
+    @asyncSlot()
+    async def sendingFormInput(self):
+        if not self.submit_button.isEnabled():
+            return
+        self.lockedFormInput(True)
+        username = self.account_id_input.text()
+        password = self.new_password_input.text()
+        confirm_password = self.confirm_new_password_input.text()
+        if not self.code_confirmation_state:
+            if username and password and confirm_password:
+                clientSignature = await asyncio.to_thread(clientDigitalSignature, f"{username}:{password}:::Reset Password", CLIENT_TEMP_PRIVATE_KEY)
+                clientMsg = json.dumps({"Message Code": "#0002", "Client Message": f"{username}:{password}:::Reset Password", "Counter": nextCounter(), "Client Digital Signature": f"{clientSignature}"})
+                sharedSecret, cipherText = await asyncio.to_thread(serverHybridEncryption, clientMsg)
+                await sendMessageToServer(f"{sharedSecret}:{cipherText}")
+            else:
+                self.showInfoMessage("Input fields can not be empty!")
+                self.lockedFormInput(False)
+        else:
+            if self.confirm_code_input.text():
+                clientSignature = await asyncio.to_thread(clientDigitalSignature, f"{username}:{password}::{self.confirm_code_input.text()}:Reset Password", CLIENT_TEMP_PRIVATE_KEY)
+                clientMsg = json.dumps({"Message Code": "#0002", "Client Message": f"{username}:{password}::{self.confirm_code_input.text()}:Reset Password", "Counter": nextCounter(), "Client Digital Signature": f"{clientSignature}"})
+                sharedSecret, cipherText = await asyncio.to_thread(serverHybridEncryption, clientMsg)
+                await sendMessageToServer(f"{sharedSecret}:{cipherText}")
+            else:
+                self.showInfoMessage("Input fields can not be empty!")
+                self.lockedFormInput(False)
+
+    @Slot(str, bool)
+    def showInfoMessage(self, message: str, is_error: bool = True):
+        self.server_message_label.setText(message)
+        if not is_error:
+            self.server_message_label.setStyleSheet("color: #27ae60;")
+        else:
+            self.server_message_label.setStyleSheet("")
+        self.server_message_label.show()
+        if not self.code_confirmation_state:
+            if not is_error:
+                self.code_confirmation_state = True
+                self.account_id_label.hide()
+                self.account_id_input.hide()
+                self.new_password_label.hide()
+                self.new_password_input.hide()
+                self.confirm_new_password_input.hide()
+                self.confirm_code_label.show()
+                self.confirm_code_input.show()
+        if "You can not use any of your previous passwords!" in message or "new password can not be the same as your username" in message or "Please try again later." in message:
+            self.code_confirmation_state = False
+            self.account_id_label.show()
+            self.account_id_input.show()
+            self.new_password_label.show()
+            self.new_password_input.show()
+            self.confirm_new_password_input.show()
+            self.confirm_code_label.hide()
+            self.confirm_code_input.hide()
+
+
+class AuthenticationForm(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)  # This guarantees the C++ object is destroyed when closed
+        self.setWindowTitle("Welcome To David Secure Messaging App")
+        self.setFixedSize(550, 600)
+        # Apply initial theme on startup
+        applyColoringTheme(self, QGuiApplication.styleHints().colorScheme())
+        # Listen for OS theme changes
+        QGuiApplication.styleHints().colorSchemeChanged.connect(lambda colorScheme, myself=self: applyColoringTheme(myself, colorScheme))
+        self.tabs = QTabWidget()
+        self.login_tab = LoginTab()
+        self.register_tab = RegisterTab()
+        self.reset_password_tab = ResetPasswordTab()
+        self.tabs.addTab(self.login_tab, "Log In")
+        self.tabs.addTab(self.register_tab, "Register An Account")
+        self.tabs.addTab(self.reset_password_tab, "Reset Password")
+        QVBoxLayout(self).addWidget(self.tabs)
+
+        signals.authentication_success.connect(self.finishAuthentication)
+
 
     @Slot(bool)
     def finishAuthentication(self, success: bool):
@@ -688,6 +1037,7 @@ class AuthenticationForm(QDialog):
             self.reject()
         else:
             self.accept()
+
 
 
 class FriendListItemDelegate(QStyledItemDelegate):
@@ -785,6 +1135,7 @@ class MessagingApp(QMainWindow):
         signals.server_connection_error.connect(self.showServerConnectionError)
         signals.bad_request.connect(self.showBadRequestError)
         signals.invalid_request.connect(self.showInvalidRequestError)
+        signals.rate_limit.connect(self.showRateLimit)
         signals.server_pu_verification_failure.connect(self.showPUVerificationError)
         signals.sending_source_code_and_temp_pu.connect(self.sendingClientSourceCodeAndTempPU)
         signals.server_ds_verification_failure.connect(self.serverDSVerificationError)
@@ -998,13 +1349,16 @@ class MessagingApp(QMainWindow):
                     }
             """)
 
-    def show_critical_error_and_close(self, title: str, message: str):
+    def show_critical_error_and_close(self, title: str, message: str, critical_error: bool=True):
         """Helper to show an error and close the app without freezing the async loop."""
         crit_box = QMessageBox(self)
         crit_box.setWindowTitle(title)
         crit_box.setText(message)
-        crit_box.setIcon(QMessageBox.Icon.Critical)
-        crit_box.finished.connect(self.close)
+        if critical_error:
+            crit_box.setIcon(QMessageBox.Icon.Critical)
+            crit_box.finished.connect(self.close)
+        else:
+            crit_box.setIcon(QMessageBox.Icon.Information)
         crit_box.open()
 
     @Slot()
@@ -1019,6 +1373,10 @@ class MessagingApp(QMainWindow):
     @Slot()
     def showInvalidRequestError(self):
         self.show_critical_error_and_close("Invalid Request Error", "Your request is not Not Accepted (Status Code 401).")
+
+    @Slot()
+    def showRateLimit(self):
+        self.show_critical_error_and_close("Rate Limit", "Chill out! You are sending too many requests in a short amount of time.\nPlease wait 60 seconds to receive the response and continue the session! (Status Code 429).", False)
 
     @Slot()
     def showPUVerificationError(self):
@@ -1144,16 +1502,16 @@ class MessagingApp(QMainWindow):
             for message in messageHistory:
                 date = message.get("Date", "")
                 if message.get("To", "") == recipient:
-                    verifyKey = CLIENT_PERMANENT_PUBLIC_KEY
+                    verifyKey = f"{CLIENT_PERMANENT_KEY_FOLDER}/ClientRSApublicKey.pem"
                     myMessage = True
-                    decryptionStatus, aesKey = await asyncio.to_thread(RSAdecrypt, message.get("Key For Self", ""), CLIENT_PERMANENT_PRIVATE_KEY)
+                    decryptionStatus, aesKey = await asyncio.to_thread(RSAdecrypt, message.get("Key For Self", ""), f"{CLIENT_PERMANENT_KEY_FOLDER}/ClientRSAprivateKey.pem")
                     if not decryptionStatus:
                         self.clientDecryptionFailure()
                         return
                 else:
                     verifyKey = f"{CURRENT_FRIEND_PUBLIC_KEY}PublicKey.pem"
                     myMessage = False
-                    decryptionStatus, aesKey = await asyncio.to_thread(RSAdecrypt, message.get("Key For Recipient", ""), CLIENT_PERMANENT_PRIVATE_KEY)
+                    decryptionStatus, aesKey = await asyncio.to_thread(RSAdecrypt, message.get("Key For Recipient", ""), f"{CLIENT_PERMANENT_KEY_FOLDER}/ClientRSAprivateKey.pem")
                     if not decryptionStatus:
                         self.clientDecryptionFailure()
                         return
@@ -1461,10 +1819,10 @@ class MessagingApp(QMainWindow):
                     </tr>
                 </table><br>
             """)
-        senderSignature = await asyncio.to_thread(clientDigitalSignature, message, CLIENT_PERMANENT_PRIVATE_KEY)
+        senderSignature = await asyncio.to_thread(clientDigitalSignature, message,f"{CLIENT_PERMANENT_KEY_FOLDER}/ClientRSAprivateKey.pem")
         sendMessage = json.dumps({"Message": message, "Sender Signature": senderSignature})
         aesKey, EncryptedMessage = await asyncio.to_thread(aesEncryption, sendMessage)
-        keyForSelf = await asyncio.to_thread(RSAencrypt, aesKey, CLIENT_PERMANENT_PUBLIC_KEY)
+        keyForSelf = await asyncio.to_thread(RSAencrypt, aesKey, f"{CLIENT_PERMANENT_KEY_FOLDER}/ClientRSApublicKey.pem")
         keyForRecipient = await asyncio.to_thread(RSAencrypt, aesKey,f"{CURRENT_FRIEND_PUBLIC_KEY}PublicKey.pem")
         finalMessage = json.dumps({"To": recipient, "Date": date, "Message": EncryptedMessage, "Key For Self": keyForSelf, "Key For Recipient": keyForRecipient})
         clientSignature = await asyncio.to_thread(clientDigitalSignature, finalMessage, CLIENT_TEMP_PRIVATE_KEY)
