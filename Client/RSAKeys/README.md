@@ -30,7 +30,7 @@ This directory manages the RSA key pairs and public certificates required for id
 * **`Permanent/` (Persistent Identity Keys)**
 * Stores the long-term RSA key pair assigned by the server after a successful new account registration, used for account log in authentication and peer-to-peer signature authorization.
 * **Critical:** The private key in this folder is tied directly to the user's encrypted chat database. Losing this key results in unrecoverable data loss and permanent loss of account access.
-* **Server Security Policy:** During the key pair assignment after a succesful new account registration, the server will never store the private key and clear it from the memory after sending the keys securely to the client. It will up to the user to manage the key from there own!
+* **Server Security Policy:** During the key pair assignment after a succesful new account registration, the server will never store the private key and clear it from the memory after sending the keys securely to the client. It will be the responsibilty of the account owner to manage the key afterward!
 
 
 * **`ServerPU/` (Server Public Key Verification)**
