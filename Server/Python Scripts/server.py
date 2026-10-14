@@ -5,9 +5,13 @@ from Crypto.Cipher import AES
 from Crypto.Signature import pss
 from Crypto.Hash import SHA256
 from typing import Any, Tuple
+from dotenv import load_dotenv
+from email.message import EmailMessage
+from email_validator import validate_email, EmailNotValidError
 
-import hashlib, hmac, json, os, base64, re, secrets, time, asyncio, aiofiles, pathlib
+import hashlib, hmac, json, os, base64, re, secrets, time, asyncio, aiofiles, pathlib, smtplib, ssl, random
 
+load_dotenv()
 
 HEADER = 64
 PORT = 3200 # Select any unused port number that you want
@@ -23,27 +27,99 @@ CLIENTS_REGISTERED_PUBLIC_KEY = f"{ROOT_DIR / "RSAKeys" / "ClientRegisteredPubli
 CLIENT_SOURCE_CODE = ROOT_DIR / "Asset" / "client.py"
 SERVER_SHUTDOWN = False
 MAX_MESSAGE_LENGTH = 1000000   # Hard cap on a single client message (DoS protection)
-MAX_CONNECTIONS = 1000            # Connection flood limit
+MAX_AUTHENTICATE_CONNECTIONS = 1000            # Connection flood limit
 PBKDF2_ITERATIONS = 600000      # Work factor for PBKDF2-HMAC-SHA512
-MAX_FAILED_LOGINS = 6
-LOCKOUT_SECONDS = 10800
+MAX_FAILED_LOGINS = 7
+LOCKOUT_SECONDS = 10800 # 3 hr
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]{1,40}$")
+REQUEST_RATE_LIMIT = 50  # 50 requests per 30 secs
+SERVER_EMAIL_ADDRESS = "noreplycyberbot7777@gmail.com" # You need to use your own registered email for your server
+SERVER_EMAIL_CRED = os.environ["EMAIL_CRED"]
+USER_CRED_MAXIMUM_AGE = 8035200 # 93 days -> 3 month of (31 days)
+USER_CRED_MINIMUM_AGE = 10800 # 3 hr
+CONFIRM_TOKEN_EXPIRY = 180 # 3 minutes duration for temp confirm token
+temp_tokens = {"Log In": {}, "Account Registration": {}, "Reset Password": {}}
+UNAUTHENTICATE_SESSION_TIME_LIMIT = 300
+emailQueue = asyncio.Queue(maxsize=150) # Maximum background email worker job. Email is sent as another job to improve authentication response latency
+clientPermQueue = asyncio.Queue(maxsize=150) # Maximum background client Perm RSA key pairs generation worker job.
+AUTH_MIN_PROCESSING_TIME = 1.0 # Minimum amount of time the authentication (#0002) request should spend processing before returning a response. This helps reduce timing-based username/email enumeration.
 
-def hashUserPassword(password: str) -> dict:
+registered_pu_hashes = {}
+for clientPU in os.listdir(CLIENTS_REGISTERED_PUBLIC_KEY):
+    if os.path.isfile(os.path.join(CLIENTS_REGISTERED_PUBLIC_KEY, clientPU)):
+        with open(os.path.join(CLIENTS_REGISTERED_PUBLIC_KEY, clientPU), "rb") as f:
+            registered_pu_hashes[clientPU.replace(".pem", '')] = hashlib.sha512(f.read()).hexdigest()
+print(f"[REGISTERED PUBLIC KEY] Successfully obtain SHA-512 hashes of all stored registered permanent public key for all registered user")
+
+def sendEmail(subject: str, content: str, receiver_email: str) -> bool:
+    """
+    Description: Sending email
+    :param subject: Email subject
+    :param content: Email content
+    :param receiver_email: Destination email address
+    :return: Email sent status of either failed or successes
+    """
+    # Credit https://www.youtube.com/watch?v=g_j6ILT-X0k
+    sender_email = SERVER_EMAIL_ADDRESS
+
+    # Validate the destination email is valid
+    try:
+        validate_email(receiver_email, check_deliverability=True)
+    except EmailNotValidError as error:
+        print(f"[Email Validation Fail] Email '{receiver_email}' is invalid!: {error}")
+        return False
+
+    # Create a multipart message and set headers
+    email = EmailMessage()
+    email["From"] = sender_email
+    email["To"] = receiver_email
+    email["Subject"] = subject
+
+    # Add body to email
+    email.set_content(content)
+    try:
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, context=context) as server:
+            server.login(sender_email, SERVER_EMAIL_CRED)
+            server.sendmail(sender_email, receiver_email, email.as_string())
+    except smtplib.SMTPRecipientsRefused as clientError:
+        print(f"[Email Validation Fail] Error sending email to {receiver_email}: {clientError}")
+        return False
+    except Exception as other_error:
+        print(f"[Email Validation Fail] Error sending email to {receiver_email}: {other_error}")
+        return False
+    print(f"[Email Sent Success] Email sent to {receiver_email} successfully!")
+    return True
+
+
+def hashUserPassword(password: str, pastCreds: list) -> dict:
     """PBKDF2-HMAC-SHA512 with a unique random salt."""
     salt = secrets.token_bytes(16)
     derived = hashlib.pbkdf2_hmac("sha512", password.encode(), salt, PBKDF2_ITERATIONS)
-    return {"salt": base64.b64encode(salt).decode("ascii"), "hash": derived.hex(), "iterations": PBKDF2_ITERATIONS}
+    if pastCreds:
+        return {"salt": base64.b64encode(salt).decode("ascii"), "hash": derived.hex(), "iterations": PBKDF2_ITERATIONS, "Past Credentials": pastCreds.append(derived.hex()), "Minimum Age": 0, "Maximum Age": time.time() + USER_CRED_MAXIMUM_AGE}
+    else:
+        return {"salt": base64.b64encode(salt).decode("ascii"), "hash": derived.hex(), "iterations": PBKDF2_ITERATIONS, "Past Credentials": [derived.hex()], "Minimum Age": time.time() + USER_CRED_MINIMUM_AGE, "Maximum Age": time.time() + USER_CRED_MAXIMUM_AGE}
 
-def verify_password(username: str, password: str, stored: Any) -> bool:
-    """Constant-time verification; supports legacy SHA-512 entries for migration."""
-    if isinstance(stored, dict):
-        salt = base64.b64decode(stored["salt"])
-        iterations = int(stored.get("iterations", PBKDF2_ITERATIONS))
-        derived = hashlib.pbkdf2_hmac("sha512", password.encode(), salt, iterations).hex()
-        return hmac.compare_digest(derived, stored["hash"])
-    legacy = hashlib.sha512(f"{username}:{password}".encode()).hexdigest()
-    return hmac.compare_digest(legacy, str(stored))
+DUMMY_PASSWORD_HASH = hashUserPassword(secrets.token_urlsafe(32), []) # This allows non-existing accounts to perform the same expensive password verification operation as existing accounts without exposing whether the account exists.
+
+def verify_password(password: str, stored: Any, checkReuse: bool, checkMinimumAge: bool, checkExpire: bool) -> bool:
+    """Constant-time verification"""
+    salt = base64.b64decode(stored["salt"])
+    iterations = int(stored.get("iterations", PBKDF2_ITERATIONS))
+    derived = hashlib.pbkdf2_hmac("sha512", password.encode(), salt, iterations).hex()
+    if hmac.compare_digest(derived, stored["hash"]):
+        if checkReuse:
+            if derived in stored["Past Credentials"]: # Credential re-use
+                return False
+        if checkMinimumAge:
+            if time.time() <= stored["Minimum Age"]:
+                return False
+        if checkExpire:
+            if time.time() >= stored["Maximum Age"]:
+                return False
+        return True
+    return False
 
 print("Starting server...")
 with open(USER_ACCOUNT_JSON_PATH, "r") as file:
@@ -170,20 +246,105 @@ async def serverSendMessage(message: str, clientUID: int) -> None:
     await clientSocket.drain()
 
 
+async def rateLimitReset() -> None:
+    """
+    Description: Background worker for resetting current active clients Rate Limit
+    :return: None
+    """
+    print(f"[SCHEDULE TASK] Starting scheduled background task 'RATE LIMIT RESET'")
+    while True:
+        for _, clientData in activeClients.items():
+            clientData["Request Count"] = 0
+        await asyncio.sleep(30)
+
+async def clearExpireConfirmTokens() -> None:
+    """
+    Description: Background worker for cleaning expire confirmation tokens
+    :return: None
+    """
+    print(f"[SCHEDULE TASK] Starting scheduled background task 'CLEANING EXPIRE CONFIRM TOKEN'")
+    while True:
+        for authType in temp_tokens:
+            tokenToBeDeletes = []
+            for email, token in temp_tokens.get(authType, {}).items():
+                if time.time() >= token.get("expire", 0):
+                    tokenToBeDeletes.append(email)
+            for email in tokenToBeDeletes:
+                print(f"[EXPIRE CONFIRM TOKEN]Deleting expire {authType} confirmation token for email {email}")
+                temp_tokens[authType].pop(email, None)
+        await asyncio.sleep(30)
+
+
+async def emailWorker() -> None:
+    """
+    Description: Background worker for sending emails without blocking the authentication request.
+    """
+    print(f"[SCHEDULE TASK] Starting background task for processing email notifications awaiting in email queue")
+    while True:
+        emailData = await emailQueue.get()
+        try:
+            await asyncio.to_thread(sendEmail,emailData["Subject"],emailData["Content"], emailData["Receiver Email"])
+        except Exception as other_error:
+            print(f"[Email Worker Error] Error processing email queue: {other_error}")
+        finally:
+            emailQueue.task_done()
+
+
+async def clientRSAAssigningWorker() -> None:
+    """
+    Description: Background worker for assigning permanent RSA key pairs with a newly registered account.
+    """
+    print(f"[SCHEDULE TASK] Starting background task for sending permanent RSA key pairs to a newly registered account")
+    while True:
+        data = await clientPermQueue.get()
+        clientUsername = data["Username"]
+        clientUID = data["Client UID"]
+        nonAvailableHashes = [h for _, h in registered_pu_hashes.items()]
+        while True:
+            print(f"[NEW REGISTERED ACCOUNT RSA ASSIGNMENT] Generating new permanent RSA key pairs for '{clientUsername}'")
+            key = RSA.generate(4096)
+            privateKey = key.export_key()
+            publicKey = key.publickey().export_key()
+            if hashlib.sha512(publicKey).hexdigest() not in nonAvailableHashes:
+                break
+        print(f"[NEW REGISTERED ACCOUNT RSA ASSIGNMENT] New permanent RSA key pairs for '{clientUsername}' successfully generated!")
+        clientPIb64 = base64.b64encode(privateKey).decode('ascii')
+        clientPUb64 = base64.b64encode(publicKey).decode('ascii')
+        message = f"{clientPIb64}:{clientPUb64}:Your account official permanent RSA key pairs!"
+        serverSignature = await asyncio.to_thread(serverDigitalSignature, message)
+        serverMsg = json.dumps({"Message Code": "#0002", "Status Code": 200, "Server Message": message, "Auth Type": "Account Registration", "Server Digital Signature": f"{serverSignature}"})
+        shareSecret, cipherText = await asyncio.to_thread(clientHybridEncryption, serverMsg, f"{CLIENTS_TEMP_PUBLIC_KEY}{clientUID}.pem")
+        await serverSendMessage(f"{shareSecret}:{cipherText}", clientUID)
+        registered_pu_hashes[hashlib.sha512(clientUsername.encode()).hexdigest()] = hashlib.sha512(publicKey).hexdigest() # For future verification to prevent the client from sending a completely different Public key from the server-assigned upon final verification
+        print(f"[NEW REGISTERED ACCOUNT RSA ASSIGNMENT] Sending newly generated permanent RSA key pairs for '{clientUsername}' to {clientUID} for user confirmation!")
+        privateKey = ''
+        publicKey = ''
+        clientPIb64 = ''
+        clientPUb64 = ''
+        print(f"[NEW REGISTERED ACCOUNT RSA ASSIGNMENT] Clearing newly generated permanent RSA key pairs for '{clientUsername}' from memory!")
+        clientPermQueue.task_done()
 
 async def clientHandle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     global SERVER_SHUTDOWN
     clientUID = writer.get_extra_info('peername')[1]
     print(f"[NEW CONNECTION] {clientUID} connected.")
     print(f"[ACTIVE CONNECTION COUNT] {len(activeClients) + 1} client(s)!")
-    if len(activeClients) >= MAX_CONNECTIONS:
+    if len(activeClients) >= MAX_AUTHENTICATE_CONNECTIONS:
         writer.close()
         print("[CONNECTION ABORT] Maximum client connection count reached.")
         return
-    activeClients[clientUID] = {"Client Socket": writer, "SHA-512 Username": "", "Username": "", "Current Connection Status": "First Connection", "Current Friend Interaction": "", "Authenticated": False, "Message Counter": 0, "Auth Challenge": ""}
+    activeClients[clientUID] = {"Client Socket": writer, "SHA-512 Username": "", "Username": "", "Current Connection Status": "First Connection", "Current Friend Interaction": "", "Authenticated": False, "Message Counter": 0, "Auth Challenge": "", "Request Count": 0, "Log In Confirm Code Request Count": 0, "Account Registration Confirm Code Request Count": 0, "Reset Password Confirm Code Request Count": 0, "Unauthenticated Connection Time Limit": time.time() + UNAUTHENTICATE_SESSION_TIME_LIMIT}
     try:
         while True:
-            clientMsgLengthBytes = await reader.read(HEADER)
+            activeClients[clientUID]["Request Count"] += 1
+            if not activeClients[clientUID]["Authenticated"]:
+                idleTimeout = 120 # Idle time for unauthenticated session is 2 minutes
+            else:
+                idleTimeout = 300 # Idle time for authenticated session is 5 minutes
+            clientMsgLengthBytes = await asyncio.wait_for(reader.read(HEADER), timeout=idleTimeout)
+            if not activeClients[clientUID]["Authenticated"] and time.time() >= activeClients[clientUID]["Unauthenticated Connection Time Limit"]: # Maximum Session for unauthenticated client is according to UNAUTHENTICATE_SESSION_TIME_LIMIT
+                print(f"[UNAUTHENTICATE CONNECTION REACH LIMIT] Client {clientUID} been connecting to the server for too long and not authenticate yet!")
+                raise ConnectionAbortedError
             if clientMsgLengthBytes:
                 clientMsgLength = int(clientMsgLengthBytes.decode())
                 if clientMsgLength > MAX_MESSAGE_LENGTH:
@@ -220,6 +381,11 @@ async def clientHandle(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
                                 serverSignature = await asyncio.to_thread(serverDigitalSignature, "Unauthorized Request!")
                                 await serverSendMessage(f'{{"Status Code": 401, "Server Message": "Unauthorized Request!", "Server Digital Signature": "{serverSignature}"}}', clientUID)
                                 continue
+                            if activeClients[clientUID]["Request Count"] > REQUEST_RATE_LIMIT:
+                                print(f"[TOO MANY REQUEST] Client {clientUID} send too many requests - Rate Limit Initiate!")
+                                serverSignature = await asyncio.to_thread(serverDigitalSignature,"Too Many Request!")
+                                await serverSendMessage(f'{{"Status Code": 429, "Server Message": "Too Many Request!", "Server Digital Signature": "{serverSignature}"}}', clientUID)
+                                await asyncio.sleep(60)
 
                             # Client Source Code and Temp PU
                             if clientMsg.get("Message Code", "") == "#0001":
@@ -252,61 +418,313 @@ async def clientHandle(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
                             else:
                                 if await asyncio.to_thread(clientSignatureVerify, clientMsg.get("Client Digital Signature", ''), clientMsg.get("Client Message", ""), f"{CLIENTS_TEMP_PUBLIC_KEY}{clientUID}.pem"):
 
-                                    # User submit authentication credential
+                                    # User Attempt Log-In or Registering An Account or Account Reset Password
                                     if clientMsg.get("Message Code", "") == "#0002":
-                                        clientUserName = clientMsg.get("Client Message", "").split(':')[0]
-                                        clientPassword = clientMsg.get("Client Message", "").split(':')[1]
-                                        if clientUserName in account_data.keys():
-                                            account = account_data[clientUserName]
-                                            if account.get("Current Lock Out Time", 0) < time.time():
-                                                if verify_password(clientUserName, clientPassword, account["Password"]):
-                                                    print(f"[AUTHENTICATION CHECK] Client {clientUID} Credential VALID!")
-                                                    print(f"[AUTHENTICATION CHECK] Sending an AUTH CHALLENGE to {clientUID}!")
-                                                    account["Failed Attempts"] = 0
-                                                    authChallenge = secrets.token_hex(32)
-                                                    activeClients[clientUID]["Auth Challenge"] = authChallenge
-                                                    activeClients[clientUID]["SHA-512 Username"] = hashlib.sha512(clientUserName.encode()).hexdigest()
-                                                    activeClients[clientUID]["Username"] = clientUserName
-                                                    serverSignature = await asyncio.to_thread(serverDigitalSignature, "Authentication Success!")
-                                                    serverMsg = json.dumps({"Message Code": "#0002", "Status Code": 200, "Server Message": "Authentication Success!", "Auth Challenge": authChallenge, "Server Digital Signature": f"{serverSignature}"})
-                                                else:
-                                                    print(f"[AUTHENTICATION CHECK] Client {clientUID} Credential INVALID!")
-                                                    failedAttempts = account.get("Failed Attempts", 0) + 1
-                                                    account["Failed Attempts"] = failedAttempts
-                                                    if failedAttempts >= MAX_FAILED_LOGINS:
-                                                        account["Current Lock Out Time"] = time.time() + LOCKOUT_SECONDS
-                                                        account.setdefault("Locked Out Record", []).append(time.ctime(time.time()))
-                                                        serverSignature = await asyncio.to_thread(serverDigitalSignature, "Too Many Invalid Log In Attempt!\nAccount is locked for 3 hr!")
-                                                        serverMsg = json.dumps({"Message Code": "#0002", "Status Code": 401, "Server Message": "Too Many Invalid Log In Attempt!\nAccount is locked for 3 hr!", "Server Digital Signature": f"{serverSignature}"})
+
+                                        authenticationStartTime = time.monotonic()
+
+                                        clientMessageParts = clientMsg.get("Client Message", "").split(':')
+                                        if len(clientMessageParts) == 5:
+                                            authType = clientMessageParts[4]
+                                            clientPassword = clientMessageParts[2] if authType == "Account Registration" else clientMessageParts[1]
+                                            clientConfirmCode = clientMessageParts[3]
+                                            clientUserName = clientMessageParts[0]
+
+                                            confirmCodeRequestType = f"{authType} Confirm Code Request Count"
+                                            if authType in ["Log In", "Account Registration", "Reset Password"]:
+
+                                                # Log In, Registration and Reset Password Confirmation Code Brute-Force Prevention
+                                                if activeClients[clientUID][confirmCodeRequestType] >= MAX_FAILED_LOGINS:
+                                                    print(f"[{authType.upper()} FAIL] Client {clientUID} is suspicious for potential confirm code brute-force!")
+                                                    if activeClients[clientUID][confirmCodeRequestType] >= 50:
+                                                        raise ConnectionAbortedError
+                                                    elif activeClients[clientUID][confirmCodeRequestType] >= 40:
+                                                        trollMessage = "Nice Try Diddy!"
+                                                    elif activeClients[clientUID][confirmCodeRequestType] >= 10:
+                                                        trollMessage = "Still trying to brute force?"
                                                     else:
-                                                        remaining = MAX_FAILED_LOGINS - failedAttempts
-                                                        serverSignature = await asyncio.to_thread(serverDigitalSignature, f"Invalid Credential Provided!\nYou have {remaining} login attempts remaining!")
-                                                        serverMsg = json.dumps({"Message Code": "#0002", "Status Code": 401, "Server Message": f"Invalid Credential Provided!\nYou have {remaining} login attempts remaining!", "Server Digital Signature": f"{serverSignature}"})
-                                                async with ACCOUNT_LOCK:
-                                                    async with aiofiles.open(USER_ACCOUNT_JSON_PATH, "w") as accountDataFile:
-                                                        await accountDataFile.write(json.dumps(account_data, indent=4))
+                                                        trollMessage = "Too Many Invalid Code Attempt!"
+                                                    serverSignature = await asyncio.to_thread(serverDigitalSignature, trollMessage)
+                                                    serverMsg = json.dumps({"Message Code": "#0002", "Status Code": 401, "Server Message": trollMessage, "Auth Type": authType, "Server Digital Signature": f"{serverSignature}"})
+
+                                                else:
+                                                    accountExist = False
+                                                    if authType == "Account Registration":
+                                                        # Account already exist, but we will mirror the same response structure as if the account does not exist, this prevents username enumeration by malicious user!
+                                                        clientEmail = clientMessageParts[1]
+
+                                                        if not clientUserName in account_data.keys(): # Username does not exist, check email
+                                                            for _, accountData in account_data.items():
+                                                                if clientEmail == accountData.get("Email"):
+                                                                    accountExist = True
+                                                        else:
+                                                            for _, accountData in account_data.items(): # Still perform the email look up to prevent response timing different
+                                                                if clientEmail == accountData.get("Email"):
+                                                                    accountExist = True
+                                                            accountExist = True
+                                                        if clientEmail == SERVER_EMAIL_ADDRESS:
+                                                            accountExist = True
+                                                    else:
+                                                        accountExist = False
+                                                        # Account does not exist, but we will mirror the same response structure as if the account does exist, this prevents username enumeration by malicious user!
+                                                        if clientUserName not in account_data.keys(): # If user provide an email, try to get client username to verify account exist
+                                                            clientEmail = clientUserName
+                                                            clientUserName = ''
+                                                            for username, accountData in account_data.items():
+                                                                if accountData.get("Email", '') == clientEmail:
+                                                                    clientUserName = username
+                                                                    accountExist = True
+                                                        else: # If user provide an account username, and it exists, get the registered email with the account
+                                                            accountExist = True
+                                                            clientEmail = account_data.get(clientUserName, {}).get("Email", "")
+                                                            for _, accountData in account_data.items():
+                                                                if accountData.get("Email", '') == clientEmail:
+                                                                    pass
+                                                        if clientEmail == SERVER_EMAIL_ADDRESS:
+                                                            accountExist = True
+                                                    sendCode = False
+                                                    message = ""
+                                                    statusCode = 0
+                                                    if (authType == "Account Registration" and not accountExist) or (authType in ["Log In", "Reset Password"] and accountExist):
+                                                        if clientConfirmCode:
+                                                            if clientEmail in temp_tokens[authType].keys():
+                                                                tokenData = temp_tokens[authType].get(clientEmail, {})
+                                                                if clientConfirmCode == tokenData["token"]:
+                                                                    if time.time() < tokenData["expire"]:
+                                                                        temp_tokens[authType].pop(clientEmail, None)
+
+                                                                        # ----LOG IN (CONFIRM CODE ALREADY SENT)---
+                                                                        if authType == "Log In":
+                                                                            if account_data[clientUserName]["Current Lock Out Time"] >= LOCKOUT_SECONDS:
+                                                                                print(f"[AUTHENTICATION CHECK] Client {clientUID} - Account '{clientUserName}' is locked!")
+                                                                                lockedTimeRemaining = account_data[clientUserName]["Current Lock Out Time"] - time.time()
+                                                                                lockedTimeRemainingFormat = time.strftime('%H:%M:%S', time.gmtime(lockedTimeRemaining))
+                                                                                message = f"Your account is currently locked for {lockedTimeRemainingFormat}"
+                                                                                statusCode = 403
+                                                                            else:
+                                                                                if verify_password(clientPassword, account_data[clientUserName]["Password"], checkReuse=False, checkMinimumAge=False, checkExpire=True):
+                                                                                    print(f"[AUTHENTICATION CHECK] Client LOG IN CONFIRM CODE is VALID!")
+                                                                                    print(f"[AUTHENTICATION CHECK] Sending an AUTH CHALLENGE to {clientUID}!")
+                                                                                    authChallenge = secrets.token_hex(32)
+                                                                                    activeClients[clientUID]["Auth Challenge"] = authChallenge
+                                                                                    activeClients[clientUID]["SHA-512 Username"] = hashlib.sha512(clientUserName.encode()).hexdigest()
+                                                                                    activeClients[clientUID]["Username"] = clientUserName
+                                                                                    serverSignature = await asyncio.to_thread(serverDigitalSignature, "Server is verifying your account public key!")
+                                                                                    serverMsg = json.dumps({"Message Code": "#0002", "Status Code": 200, "Server Message": "Server is verifying your account public key!", "Auth Type": authType, "Auth Challenge": authChallenge, "Server Digital Signature": f"{serverSignature}"})
+                                                                                    authenticationElapsedTime = time.monotonic() - authenticationStartTime
+                                                                                    authenticationRemainingTime = AUTH_MIN_PROCESSING_TIME - authenticationElapsedTime
+                                                                                    if authenticationRemainingTime > 0:
+                                                                                        await asyncio.sleep(authenticationRemainingTime)
+
+                                                                                    shareSecret, cipherText = await asyncio.to_thread(clientHybridEncryption, serverMsg, f"{CLIENTS_TEMP_PUBLIC_KEY}{clientUID}.pem")
+                                                                                    await serverSendMessage(f"{shareSecret}:{cipherText}", clientUID)
+                                                                                    continue
+                                                                                else:
+                                                                                    print(f"[AUTHENTICATION CHECK] Client {clientUID} Credential VALID, but expired!")
+                                                                                    message = f"Your password has been expired!\nPlease reset for a new one!"
+                                                                                    statusCode = 403
+
+                                                                        # ----ACCOUNT REGISTRATION (CONFIRM CODE ALREADY SENT)---
+                                                                        elif authType == "Account Registration":
+                                                                            print(f"[NEW ACCOUNT REGISTRATION] Client {clientUID} sent a valid account registration code!")
+                                                                            try:
+                                                                                clientPermQueue.put_nowait({
+                                                                                    "Username": clientUserName,
+                                                                                    "Client UID":  clientUID,
+                                                                                })
+                                                                            except asyncio.QueueFull:
+                                                                                print(f"[New RSA Key Generator Queue] RSA Generator queue is full! {authType} Verification Code was not queued for '{clientUserName}'!")
+                                                                                message = "Unable to process request at this time.\nPlease try again later."
+                                                                                statusCode = 503
+
+                                                                        # ----RESET PASSWORD (CONFIRM CODE ALREADY SENT)---
+                                                                        elif authType == "Reset Password":
+                                                                            # Check if account is locked
+                                                                            if account_data[clientUserName]["Current Lock Out Time"] >= LOCKOUT_SECONDS:
+                                                                                lockedTimeRemaining = account_data[clientUserName]["Current Lock Out Time"] - time.time()
+                                                                                lockedTimeRemainingFormat = time.strftime('%H:%M:%S', time.gmtime(lockedTimeRemaining))
+                                                                                print(f"[NEW PASSWORD RESET FAIL] Account {clientUserName} is currently locked for {lockedTimeRemainingFormat}")
+                                                                                message = f"Your account is currently locked for {lockedTimeRemainingFormat}"
+                                                                                statusCode = 403
+                                                                            else:
+                                                                                if clientPassword == clientUserName:
+                                                                                    print(f"[NEW PASSWORD RESET FAIL] Client {clientUID} set new password THE SAME AS the account username!")
+                                                                                    message = "Your new password can not be the same as your username!"
+                                                                                    statusCode = 401
+                                                                                else:
+                                                                                    # Check if credential reuse and just set
+                                                                                    if verify_password(clientPassword, account_data[clientUserName]["Password"], checkReuse=False, checkMinimumAge=True, checkExpire=False):
+                                                                                        if verify_password(clientPassword, account_data[clientUserName]["Password"], checkReuse=True, checkMinimumAge=False, checkExpire=False):
+                                                                                            account_data[clientUserName]["Password"] = hashUserPassword(clientPassword, account_data[clientUserName]["Password"]["Past Credentials"])
+                                                                                            async with ACCOUNT_LOCK:
+                                                                                                async with aiofiles.open(USER_ACCOUNT_JSON_PATH, "w") as accountDataFile:
+                                                                                                    await accountDataFile.write(json.dumps(account_data, indent=4))
+                                                                                            print(f"[NEW PASSWORD RESET SUCCESS] Client {clientUID} password reset SUCCESSFUL for account '{clientUserName}'")
+                                                                                            message = f"Your password has been updated!"
+                                                                                            statusCode = 200
+                                                                                        else:
+                                                                                            print(f"[NEW PASSWORD RESET FAIL] Client {clientUID} reuse password for account '{clientUserName}'")
+                                                                                            message = f"Password reset failed. You can not use any of your previous passwords!"
+                                                                                            statusCode = 401
+                                                                                    else:
+                                                                                        # Uh-Oh, user just change their password, but want to change again! Could be a potential attack for malicious user to abuse unlimited password reset!
+                                                                                        print(f"[NEW PASSWORD RESET FAIL] Client {clientUID} think password reset is not rate limit for account '{clientUserName}'")
+                                                                                        message = f"Password reset failed. You just changed your password!"
+                                                                                        statusCode = 401
+
+                                                                    else:
+                                                                        # Code expire -> resend
+                                                                        sendCode = True
+                                                                        print(f"[{authType.upper()} FAIL] Client {clientUID} provided expired {authType.upper()} CODE!")
+                                                                        temp_tokens[authType].pop(clientEmail, None)
+
+                                                                else:
+                                                                    print(f"[{authType.upper()} FAIL] Client {clientUID} provided INVALID {authType.upper()} CODE!")
+                                                                    activeClients[clientUID][confirmCodeRequestType] += 1
+                                                                    message = f"Invalid {authType} Code!"
+                                                                    statusCode = 401
+                                                            else:
+                                                                # Code expire -> resend
+                                                                activeClients[clientUID][confirmCodeRequestType] = 0
+                                                                sendCode = True
+                                                                print(f"[{authType.upper()} FAIL] Client {clientUID} provided expired {authType.upper()} CODE!")
+                                                        else:
+                                                            # ----LOG IN (CONFIRM CODE NOT SENT YET)---
+                                                            if authType == "Log In":
+                                                                if verify_password(clientPassword, account_data[clientUserName]["Password"], checkReuse=False, checkMinimumAge=False, checkExpire=False):
+                                                                    print(f"[AUTHENTICATION CHECK] Client {clientUID} Credential VALID!")
+                                                                    print(f"[AUTHENTICATION CHECK] Sending a LOG IN CONFIRM CODE to {clientUID}!")
+                                                                    async with ACCOUNT_LOCK:
+                                                                        async with aiofiles.open(USER_ACCOUNT_JSON_PATH, "w") as accountDataFile:
+                                                                            await accountDataFile.write(json.dumps(account_data, indent=4))
+                                                                    sendCode = True
+                                                                else:
+                                                                    print(f"[AUTHENTICATION CHECK] Client {clientUID} Credential INVALID!")
+                                                                    account_data[clientUserName]["Failed Attempts"] += 1
+                                                                    if account_data[clientUserName]["Failed Attempts"] >= MAX_FAILED_LOGINS:
+                                                                        print(f"[AUTHENTICATION CHECK] Client {clientUID} - Too many INVALID login attempt for account '{clientUserName}'!")
+                                                                        account_data[clientUserName]["Current Lock Out Time"] = time.time() + LOCKOUT_SECONDS
+                                                                        account_data[clientUserName]["Locked Out Record"].append(time.ctime(time.time()))
+                                                                        message = "Too Many Invalid Log In Attempt!\nAccount is locked for 3 hr!"
+                                                                        try:
+                                                                            emailQueue.put_nowait({
+                                                                                "Subject": "Account Lockout",
+                                                                                "Content": f"Your 'David Secure Chatroom' account {clientUserName} is being locked out for 3 hr due to so many invalid login attempts!\n\nIf you suspect a malicious activity has been conducted against your account, please report to the server owner at (put-your-server-abuse-or-IT-email-here)",
+                                                                                "Receiver Email": clientEmail
+                                                                            })
+                                                                        except asyncio.QueueFull:
+                                                                            print(f"[Email Queue] Email queue is full! Account Lockout notification was not queued for account '{clientUserName}'!")
+                                                                        else:
+                                                                            print(f"[AUTHENTICATION CHECK] Account Lockout Notification email queued for registered email of account '{clientUserName}'!")
+                                                                        statusCode = 403
+                                                                    else:
+                                                                        remaining = MAX_FAILED_LOGINS - account_data[clientUserName]["Failed Attempts"]
+                                                                        message = f"Invalid Credential Provided!\nYou have {remaining} login attempts remaining!"
+                                                                        statusCode = 401
+
+                                                            # ----ACCOUNT REGISTRATION (CONFIRM CODE NOT SENT YET)---
+                                                            elif authType == "Account Registration":
+                                                                if clientUserName == clientPassword:
+                                                                    print(f"[NEW ACCOUNT REGISTRATION FAIL] Client {clientUID} set new password THE SAME AS the account username!")
+                                                                    message = "Your username can not be the same as your password!"
+                                                                    statusCode = 401
+                                                                else:
+                                                                    match = re.match(USERNAME_PATTERN, clientUserName)
+                                                                    if not match or clientUserName in account_data:
+                                                                        print(f"[NEW ACCOUNT REGISTRATION FAIL] Client {clientUID} set account username DOES NOT pass the username policy!")
+                                                                        message = "Username can only have mixed case ASCII letters, numbers and -._"
+                                                                        statusCode = 401
+                                                                    else:
+                                                                        if len(clientPassword) < 12 or None in [re.search(r'[a-z]', clientPassword), re.search(r'[A-Z]', clientPassword), re.search(r'\d', clientPassword), re.search(r'[!@#$%&*_+=]', clientPassword)]:
+                                                                            print(f"[NEW ACCOUNT REGISTRATION FAIL] Client {clientUID} set new password DOES NOT pass the secure password policy!")
+                                                                            message = "Password must at least 12 characters!\nHave mixed case ASCII letters and numbers!\nHave any of the following special characters below:\n@#$%&*_+="
+                                                                            statusCode = 401
+                                                                        else:
+                                                                            sendCode = True
+
+                                                            # ----RESET PASSWORD (CONFIRM CODE NOT SENT YET)---
+                                                            elif authType == "Reset Password":
+                                                                if len(clientPassword) < 12 or None in [re.search(r'[a-z]', clientPassword), re.search(r'[A-Z]', clientPassword), re.search(r'\d', clientPassword), re.search(r'[!@#$%&*_+=]', clientPassword)]:
+                                                                    print(f"[NEW PASSWORD RESET FAIL] Client {clientUID} set new password DOES NOT pass the secure password policy!")
+                                                                    message = "Password must at least 12 characters!\nHave mixed case ASCII letters and numbers!\nHave any of the following special characters below:\n@#$%&*_+="
+                                                                    statusCode = 401
+                                                                else:
+                                                                    sendCode = True
+
+                                                        if sendCode:
+                                                            confirmToken = ""
+                                                            for i in range(random.randint(7, 30)):
+                                                                confirmToken += random.choice(f"ABCDEFGHIJKLNMOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz1234567890!@#$%&*_+=")
+                                                            temp_tokens[authType][clientEmail] = {"token": confirmToken, "expire": time.time() + CONFIRM_TOKEN_EXPIRY}
+                                                            emailTitle = f"{authType} Verification Code"
+                                                            try:
+                                                                emailQueue.put_nowait({
+                                                                    "Subject": emailTitle,
+                                                                    "Content": f"Your 'David Secure Chatroom' {emailTitle} is {confirmToken}\n\nThis code will expire in {CONFIRM_TOKEN_EXPIRY // 60} minutes!\nIf you did not request this, please ignore this email.",
+                                                                    "Receiver Email": clientEmail
+                                                                })
+                                                                statusCode = 200
+                                                                message = f"If an account with the provided username or email {'doest not exist' if authType == "Account Registration" else 'does exist'}\nAn {authType} Verification Code will be sent to\nThe registered email with the account!"
+                                                            except asyncio.QueueFull:
+                                                                print(f"[Email Queue] Email queue is full! {authType} Verification Code was not queued for '{clientEmail}'!")
+                                                                message = "Unable to process request at this time.\nPlease try again later."
+                                                                statusCode = 503
+
+                                                    else:
+                                                        if authType == "Log In":
+                                                            print(f"[AUTHENTICATION CHECK] Client {clientUID} provided NON-EXISTING account!")
+                                                            # Always perform password verification. If the account does not exist, use DUMMY_PASSWORD_HASH so an attacker cannot distinguish account existence by password-hashing time.
+                                                            activeClients[clientUID][confirmCodeRequestType] += 1
+                                                            verify_password(clientPassword, DUMMY_PASSWORD_HASH, checkReuse=False, checkMinimumAge=False, checkExpire=False)
+                                                            if activeClients[clientUID][confirmCodeRequestType] >= MAX_FAILED_LOGINS:
+                                                                message = "Too Many Invalid Log In Attempt!\nAccount is locked for 3 hr!"
+                                                                statusCode = 403
+                                                            else:
+                                                                message = f"Invalid Credential Provided!\nYou have {MAX_FAILED_LOGINS - activeClients[clientUID][confirmCodeRequestType]} login attempts remaining!"
+                                                                statusCode = 401
+                                                        else:
+                                                            print(f"[{authType.upper()} FAIL] Client {clientUID} provided account {'already exist' if authType == "Account Registration" else 'does not exist'}!")
+                                                            if clientConfirmCode:
+                                                                activeClients[clientUID][confirmCodeRequestType] += 1
+                                                                message = f"Invalid {authType} Code!"
+                                                                statusCode = 401
+                                                            else:
+                                                                message = f"If an account with the provided username or email {'doest not exist' if authType == "Account Registration" else 'does exist'}\nAn {authType} Verification Code will be sent to\nThe registered email with the account!"
+                                                                statusCode = 200
+
+                                                    authenticationElapsedTime = time.monotonic() - authenticationStartTime
+                                                    authenticationRemainingTime = AUTH_MIN_PROCESSING_TIME - authenticationElapsedTime
+                                                    if authenticationRemainingTime > 0:
+                                                        await asyncio.sleep(authenticationRemainingTime)
+
+                                                    serverSignature = await asyncio.to_thread(serverDigitalSignature, message)
+                                                    serverMsg = json.dumps({"Message Code": "#0002", "Status Code": statusCode, "Server Message": message, "Auth Type": authType, "Server Digital Signature": f"{serverSignature}"})
+
+                                            #----INVALID METHOD--
                                             else:
-                                                lockedTimeRemaining = account["Current Lock Out Time"] - time.time()
-                                                lockedTimeRemainingFormat = time.strftime('%H:%M:%S', time.gmtime(lockedTimeRemaining))
-                                                serverSignature = await asyncio.to_thread(serverDigitalSignature, f"Your account is currently locked for {lockedTimeRemainingFormat}")
-                                                serverMsg = json.dumps({"Message Code": "#0002", "Status Code": 403, "Server Message": f"Your account is currently locked for {lockedTimeRemainingFormat}", "Server Digital Signature": f"{serverSignature}"})
+                                                print(f"[BAD REQUEST ERROR] Recieved data from client {clientUID} for #0002 in invalid format!")
+                                                serverSignature = await asyncio.to_thread(serverDigitalSignature, "Bad Request Error")
+                                                serverMsg = json.dumps({"Status Code": 400, "Server Message": "Bad Request Error", "Server Digital Signature": f"{serverSignature}"})
+                                                await serverSendMessage(serverMsg, clientUID)
+                                                continue
                                         else:
-                                            print(f"[AUTHENTICATION CHECK] Client {clientUID} provided Account '{clientUserName}' need registration!")
-                                            activeClients[clientUID]["SHA-512 Username"] = hashlib.sha512(clientUserName.encode()).hexdigest()
-                                            activeClients[clientUID]["Username"] = clientUserName
-                                            serverSignature = await asyncio.to_thread(serverDigitalSignature, f"There is no registered account with user name [{clientUserName}] yet!")
-                                            serverMsg = json.dumps({"Message Code": "#0002", "Status Code": 401, "Server Message": f"There is no registered account with user name [{clientUserName}] yet!", "Server Digital Signature": f"{serverSignature}"})
+                                            print(f"[BAD REQUEST ERROR] Recieved data from client {clientUID} for #0002 in invalid format!")
+                                            serverSignature = await asyncio.to_thread(serverDigitalSignature, "Bad Request Error")
+                                            serverMsg = json.dumps({"Status Code": 400, "Server Message": "Bad Request Error", "Server Digital Signature": f"{serverSignature}"})
+                                            await serverSendMessage(serverMsg, clientUID)
+                                            continue
+
                                         shareSecret, cipherText = await asyncio.to_thread(clientHybridEncryption, serverMsg, f"{CLIENTS_TEMP_PUBLIC_KEY}{clientUID}.pem")
                                         await serverSendMessage(f"{shareSecret}:{cipherText}", clientUID)
 
-                                    # User submit an authentication challenge to confirm login or finishing a new account registration
+
+                                    # User submit an authentication challenge and Perm PU hash to finalize login confirmation OR the final new account data for account registration confirmation
                                     elif clientMsg.get("Message Code", "") == "#0003":
                                         clientMessageParts = clientMsg.get("Client Message", "").split(':')
-                                        if len(clientMessageParts) == 4:
-
-                                            if clientMessageParts[3] == "Confirm Login":
-                                                # ---- LOGGING IN CONFIRM----
-                                                clientProvidedPUHashed, clientChallenge, clientPermSignature, _ = clientMessageParts
+                                        if len(clientMessageParts) == 5:
+                                            authType = clientMessageParts[4]
+                                            if authType == "Log In":
+                                                clientProvidedPUHashed, clientChallenge, clientPermSignature, _, __ = clientMessageParts
                                                 registeredPUPath = f"{CLIENTS_REGISTERED_PUBLIC_KEY}{activeClients[clientUID]['SHA-512 Username']}.pem"
                                                 serverSideClientPUHashed = ""
                                                 if os.path.exists(registeredPUPath):
@@ -320,8 +738,9 @@ async def clientHandle(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
                                                         print(f"[AUTHENTICATION CHECK] Client {clientUID} provide a valid registered permanent pubic key for the '{activeClients[clientUID]['Username']}'")
                                                         activeClients[clientUID]["Authenticated"] = True
                                                         print(f"[AUTHENTICATION CHECK] Client {clientUID} successfully authenticated account '{activeClients[clientUID]['Username']}'")
-                                                        serverSignature = await asyncio.to_thread(serverDigitalSignature, "Logging Successful!")
-                                                        serverMsg = json.dumps({"Message Code": "#0003", "Status Code": 200, "Server Message": "Logging Successful!", "Server Digital Signature": f"{serverSignature}"})
+                                                        serverSignature = await asyncio.to_thread(serverDigitalSignature, "Authentication Success!")
+                                                        serverMsg = json.dumps({"Message Code": "#0003", "Status Code": 200, "Server Message": "Authentication Success!", "Auth Type": authType, "Server Digital Signature": f"{serverSignature}"})
+                                                        account_data[activeClients[clientUID]["Username"]]["Failed Attempts"] = 0
                                                         account_data[activeClients[clientUID]["Username"]]["Last Log In"] = time.ctime(time.time())
                                                         async with ACCOUNT_LOCK:
                                                             async with aiofiles.open(USER_ACCOUNT_JSON_PATH, "w") as accountDataFile:
@@ -329,34 +748,32 @@ async def clientHandle(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
                                                     else:
                                                         print(f"[AUTHENTICATION CHECK] Client {clientUID} permanent key verification failure!")
                                                         serverSignature = await asyncio.to_thread(serverDigitalSignature, "Client Account Public Key Verification Error!")
-                                                        serverMsg = json.dumps({"Message Code": "#0003", "Status Code": 403, "Server Message": "Client Account Public Key Verification Error!", "Server Digital Signature": f"{serverSignature}"})
+                                                        serverMsg = json.dumps({"Message Code": "#0003", "Status Code": 403, "Server Message": "Client Account Public Key Verification Error!", "Auth Type": authType,  "Server Digital Signature": f"{serverSignature}"})
                                                 else:
                                                     print(f"[AUTHENTICATION CHECK] Client {clientUID} AUTH CHALLENGE failure!")
                                                     serverSignature = await asyncio.to_thread(serverDigitalSignature, "Client AUTH CHALLENGE failure!")
-                                                    serverMsg = json.dumps({"Message Code": "#0003", "Status Code": 403, "Server Message": "Client AUTH CHALLENGE failure!", "Server Digital Signature": f"{serverSignature}"})
-
-                                            elif clientMessageParts[3] == "Register":
-                                                clientUserName, clientPassword, clientPermPUB64, _ = clientMessageParts
-                                                clientPUHash = hashlib.sha512(clientUserName.encode()).hexdigest()
-                                                registeredPUPath = f"{CLIENTS_REGISTERED_PUBLIC_KEY}{clientPUHash}.pem"
-                                                try:
-                                                    clientPermPUBytes = base64.b64decode(clientPermPUB64, validate=True)
-                                                    RSA.import_key(clientPermPUBytes)
-                                                except (ValueError, TypeError):
-                                                    clientPermPUBytes = b""
-                                                async with ACCOUNT_LOCK:
-                                                    account_data[clientUserName] = {"Password": hashUserPassword(clientPassword), "Last Log In": time.ctime(time.time()), "Current Lock Out Time": 0, "Failed Attempts": 0, "Locked Out Record": [], "Friends": []}
-                                                    pending_notifications[clientUserName] = {"Unread Messages": {}, "Pending Friend Requests": [], "Friend Request Answers": {}}
-                                                    user_chat_history[clientUserName] = {}
-                                                    async with aiofiles.open(registeredPUPath, "wb") as clientPermPU:
-                                                        await clientPermPU.write(clientPermPUBytes)
-                                                    async with aiofiles.open(USER_ACCOUNT_JSON_PATH, "w") as accountDataFile:
-                                                        await accountDataFile.write(json.dumps(account_data, indent=4))
-                                                if not clientPermPUBytes:
-                                                    print(f"[REGISTRATION BAD REQUEST ERROR] Recieved data from client {clientUID} provided invalid Permanent RSA Public Key!")
-                                                    serverSignature = await asyncio.to_thread(serverDigitalSignature, "Bad Request Error")
-                                                    serverMsg = json.dumps({"Status Code": 400, "Server Message": "Bad Request Error", "Server Digital Signature": f"{serverSignature}"})
+                                                    serverMsg = json.dumps({"Message Code": "#0003", "Status Code": 403, "Server Message": "Client AUTH CHALLENGE failure!", "Auth Type": authType, "Server Digital Signature": f"{serverSignature}"})
+                                            elif authType == "Account Registration":
+                                                clientUserName, clientEmail, clientPassword, clientPermB64PU, _ = clientMessageParts
+                                                clientPermPUBytes = base64.b64decode(clientPermB64PU)
+                                                clientUserNameHash = hashlib.sha512(clientUserName.encode()).hexdigest()
+                                                if hashlib.sha512(clientPermPUBytes).hexdigest() != registered_pu_hashes.get(clientUserNameHash, ''):
+                                                    registered_pu_hashes.pop(clientUserNameHash, None)
+                                                    print(f"[NEW ACCOUNT REGISTRATION FAIL] Client {clientUID} provided a different registered public key upon final confirmation!")
+                                                    trollMessage = "Uh-OH!\nYou Provided...\nA Completely Different Public Key Than The Server Sent You!\nAccount Registration Fail!"
+                                                    serverSignature = await asyncio.to_thread(serverDigitalSignature, trollMessage)
+                                                    serverMsg = json.dumps({"Message Code": "#0003", "Status Code": 403, "Server Message": trollMessage, "Auth Type": authType, "Server Digital Signature": f"{serverSignature}"})
                                                 else:
+                                                    print(f"[NEW ACCOUNT REGISTRATION FAIL] Client {clientUID} final account registration confirmation acknowledge!")
+                                                    async with ACCOUNT_LOCK:
+                                                        storedPassword = hashUserPassword(clientPassword, [])
+                                                        account_data[clientUserName] = {"Email": clientEmail, "Password": storedPassword, "Last Log In": time.ctime(time.time()), "Current Lock Out Time": 0, "Failed Attempts": 0, "Locked Out Record": [], "Friends": []}
+                                                        pending_notifications[clientUserName] = {"Unread Messages": {}, "Pending Friend Requests": [], "Friend Request Answers": {}}
+                                                        user_chat_history[clientUserName] = {}
+                                                        async with aiofiles.open(f"{CLIENTS_REGISTERED_PUBLIC_KEY}{clientUserNameHash}.pem", "wb") as clientPermPU:
+                                                            await clientPermPU.write(clientPermPUBytes)
+                                                        async with aiofiles.open(USER_ACCOUNT_JSON_PATH, "w") as accountDataFile:
+                                                            await accountDataFile.write(json.dumps(account_data, indent=4))
                                                     async with NOTIF_LOCK:
                                                         async with aiofiles.open(USER_PENDING_NOTIFICATIONS_JSON_PATH, "w") as pendingNotificationFile:
                                                             await pendingNotificationFile.write(json.dumps(pending_notifications, indent=4))
@@ -364,17 +781,23 @@ async def clientHandle(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
                                                         async with aiofiles.open(USER_CHAT_HISTORY_JSON_PATH, "w") as chathistoryFile:
                                                             await chathistoryFile.write(json.dumps(user_chat_history, indent=4))
                                                     activeClients[clientUID]["Authenticated"] = True
-                                                    activeClients[clientUID]["SHA-512 Username"] = clientPUHash
+                                                    activeClients[clientUID]["SHA-512 Username"] = clientUserNameHash
                                                     activeClients[clientUID]["Username"] = clientUserName
                                                     print(f"[NEW ACCOUNT REGISTRATION] Client {clientUID} registered account '{clientUserName}'")
                                                     serverSignature = await asyncio.to_thread(serverDigitalSignature, "New Account Registration Successful!")
-                                                    serverMsg = json.dumps({"Message Code": "#0003", "Status Code": 200, "Server Message": "New Account Registration Successful!", "Server Digital Signature": f"{serverSignature}"})
+                                                    serverMsg = json.dumps({"Message Code": "#0003", "Status Code": 200, "Server Message": "New Account Registration Successful!", "Auth Type": authType, "Server Digital Signature": f"{serverSignature}"})
+                                            else:
+                                                print(f"[BAD REQUEST ERROR] Recieved data from client {clientUID} for #0003 in invalid format!")
+                                                serverSignature = await asyncio.to_thread(serverDigitalSignature, "Bad Request Error")
+                                                serverMsg = json.dumps({"Status Code": 400, "Server Message": "Bad Request Error", "Server Digital Signature": f"{serverSignature}"})
                                         else:
                                             print(f"[BAD REQUEST ERROR] Recieved data from client {clientUID} for #0003 in invalid format!")
                                             serverSignature = await asyncio.to_thread(serverDigitalSignature, "Bad Request Error")
                                             serverMsg = json.dumps({"Status Code": 400, "Server Message": "Bad Request Error", "Server Digital Signature": f"{serverSignature}"})
                                         shareSecret, cipherText = await asyncio.to_thread(clientHybridEncryption, serverMsg, f"{CLIENTS_TEMP_PUBLIC_KEY}{clientUID}.pem")
                                         await serverSendMessage(f"{shareSecret}:{cipherText}", clientUID)
+
+                                        # Broadcast new user just joined to all current active authenticated users
                                         if activeClients[clientUID]["Authenticated"]:
                                             clientUserName = activeClients[clientUID]["Username"]
                                             for otherClientUID, otherClientData in activeClients.items():
@@ -631,7 +1054,9 @@ async def clientHandle(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
                 raise ConnectionAbortedError
     except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, asyncio.IncompleteReadError, asyncio.CancelledError):
         pass
-    except Exception: # A device try to connect to the server that did not use the official client.py
+    except (asyncio.TimeoutError, TimeoutError):
+        print(f"[IDLE TIMEOUT] {'Authenticated' if activeClients[clientUID]["Authenticated"] else 'Unauthenticated'} client {clientUID} idle too long. Disconnecting.")
+    except ValueError: # A device try to connect to the server that did not use the official client.py
         await serverSendMessage("Status Code: 400 - Bad Request", clientUID)
     if not SERVER_SHUTDOWN:
         print(f"[CLIENT DISCONNECT] Client {clientUID} has disconnected")
@@ -661,6 +1086,10 @@ async def main():
     print(f"[LISTENING] Server is listening on {SERVER_IP}, Port {PORT}")
 
     try:
+        asyncio.create_task(rateLimitReset())
+        asyncio.create_task(clearExpireConfirmTokens())
+        asyncio.create_task(emailWorker())
+        asyncio.create_task(clientRSAAssigningWorker())
         await asyncio.Event().wait()
     except asyncio.CancelledError:
         pass
